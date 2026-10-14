@@ -1,18 +1,18 @@
 # Jev Claude Router
 
-A Claude Code plugin (a mod) that asks [TypeSafe](https://docs.typesafe.ai) Jev, on each new prompt, which local skills fit and which Claude model and reasoning effort to use. The model and effort choice is applied to each request through the `turn.step` mod event.
-
-This repository is a plugin marketplace. The plugin itself is in [`plugins/jev-router`](plugins/jev-router), and its README describes how it works and how to configure it.
+A plugin marketplace with one plugin, **jev-router**. On each new prompt it asks [TypeSafe](https://docs.typesafe.ai) Jev which local skills fit and which Claude model and effort to use. How it works and how to configure it: [`plugins/jev-router`](plugins/jev-router/README.md).
 
 ## Install
 
-At a Claude Code prompt:
+Requires Claude Code 2.1.287 or later and a TypeSafe API key.
+
+At a Claude Code prompt, run this and answer `y` when it asks to add the marketplace:
 
 ```
 /plugin install jev-router --marketplace DarkisuSu/Jev-Claude-Router
 ```
 
-Then enter a TypeSafe API key in the plugin's settings. Model routing starts in `dry-run`.
+Then enter the API key in the plugin's settings. Model routing starts in `dry-run`, which changes nothing.
 
 ## Install with another Claude
 
@@ -30,8 +30,3 @@ Install the "jev-router" Claude Code plugin from GitHub, then stop and tell me w
 
 Requires Claude Code 2.1.287 or later. If a step fails, quote the exact error message.
 ```
-
-## Requirements
-
-- Claude Code 2.1.287 or later (mods)
-- A TypeSafe API key

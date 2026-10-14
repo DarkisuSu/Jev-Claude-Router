@@ -8,9 +8,9 @@ A Claude Code mod that asks TypeSafe Jev on each new prompt two things:
 ## Skill routing
 
 1. **Index.** The router reads its skill list from `$.command.list()`, keeping only user and plugin entries. It adds SKILL.md text from the project's `.claude/skills` folders, `~/.claude/skills` (synced skills included) and installed plugins. Run `/jev-index` to see the list.
-2. **rank_wide.** One Choice question ranks every skill. Three Noul gates ask whether the prompt needs a skill at all. If the gate's mean is below `gate_threshold` (0.30), the result is no match.
+2. **rank_wide.** One Choice question ranks every skill. Three Noul gates ask whether the prompt needs a skill at all. If the gate's mean is below `gate_threshold` (0.3), the result is no match.
 3. **rerank.** The top `shortlist_size` skills (3, the cookbook's value) are judged again, each with its own `fits::<name>` Noul.
-4. **Select.** The fits threshold (`fits_threshold`, 0.3) is the confidence cut-off: every shortlisted skill that reaches it is recommended, best first, with no count limit. 0.3 for both the gate and fits is the Skill Suggestion cookbook's value; TypeSafe publishes no general default and advises tuning on your own data.
+4. **Select.** The fits threshold (`fits_threshold`, 0.3) is the confidence cut-off: every shortlisted skill that reaches it is recommended, best first, with no count limit. Both 0.3 defaults come from the cookbook; TypeSafe publishes no general default and advises tuning on your own data.
 
 **No match, error, timeout or no key:** the prompt goes on with nothing added, so Claude's own skill behaviour stands.
 
@@ -33,7 +33,7 @@ A Claude Code mod that asks TypeSafe Jev on each new prompt two things:
 **When a step is rewritten.** It is rewritten only when all of these hold. Otherwise the step goes as the engine resolved it, and the reason is logged.
 
 - `model_routing` is `on`. In `dry-run` (the default) nothing is rewritten, and the log shows what would have been sent.
-- The question's confidence reaches `model_threshold` (0.5, the floor in TypeSafe's Confidence guide example), checked separately for the model tier and the effort level. Past it, the highest probability decides: the most likely tier and the most likely effort level. Below it, or when Jev fails, `fallback_model` is used (default `session`, the model you chose with `/model`; set it with `/jev-model fallback haiku|sonnet|opus|session`).
+- The question's confidence reaches `model_threshold` (0.5, the floor in TypeSafe's Confidence guide example), checked separately for the model tier and the effort level. Past it, the highest probability decides: the most likely tier and the most likely effort level. Below it, or when Jev fails, `fallback_model` is used (default `session`, the model you chose with `/model`).
 - The target family's full id has been learned on this Claude Code version, it has been seen answering, and its effort support is known (see below).
 - The target has not failed earlier in this session.
 - The step is the main conversation's. Subagent steps keep their own model.
@@ -51,8 +51,6 @@ A Claude Code mod that asks TypeSafe Jev on each new prompt two things:
 - **Every step it sees**, main or subagent. `e.model` is the id the engine resolved. A response confirms the model answers, and whether the step carried `effort` shows whether that model takes effort.
 - **A `/model` switch**, through `classic.PostModelSwitch` `to_model`.
 - **`/jev-model probe`**, which starts one tiny background subagent per routable family with `$.agent.spawn({ model: alias })`. Each subagent's first step teaches that family's id and effort support. If no resend check has been done on this version, the probe also arms one on your next message: that message is first sent to a model id no account has, then resent on the session model.
-
-A family is routed to only once its id is learned, it has been seen answering, and its effort support is known.
 
 ## Settings
 
