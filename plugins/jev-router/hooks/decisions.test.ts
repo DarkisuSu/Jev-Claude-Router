@@ -19,6 +19,11 @@ const answer = () => ({ model: 'jev-test', answers: {
   readiness: { type: 'score', score: 1.1, probabilities: { '0': 0, '1': 0.9, '2': 0.1 }, confidence: 0.8 },
 } })
 const promptArgs = (tools: string[]) => ({ model: 'claude-sonnet-4-6', promptModel: 'claude-sonnet-4-6', tools, surfaces: [], outputStyle: null, traits: [] })
+// A tool's result reaches the engine as text: it must be a string, and parse back into the decision.
+const parsed = (call: { result?: unknown }) => {
+  expect(typeof call.result).toBe('string')
+  return JSON.parse(call.result as string)
+}
 const prepared = () => {
   const result = prepareDecision(input())
   if ('status' in result) throw new Error(result.reason)
@@ -110,7 +115,7 @@ describe('decision plugin integration', () => {
     mock.clock(on); memoryStore(on)
     const w = world(on, () => ({ status: 200, body: answer() }))
     const result = await $.tool.call({ tool: DECISION_TOOL, ...input() } as never)
-    expect((result.result as any).status).toBe('decided')
+    expect(parsed(result).status).toBe('decided')
     expect(w.fetches.length).toBe(1)
     expect(w.fetches[0]?.auth).toBe(`Bearer ${FAKE_KEY}`)
     expect(JSON.parse(w.fetches[0]!.body).state.facts).toEqual(input().state.facts)
@@ -120,7 +125,7 @@ describe('decision plugin integration', () => {
     const logs = JSON.stringify(entries)
     for (const text of [FAKE_KEY, 'Recover operation', 'Snapshot exists', 'recovery path', 'original']) expect(logs.includes(text)).toBe(false)
     const owned = await $.tool.call({ tool: DECISION_TOOL, ...input(), decision_owner: 'user' } as never)
-    expect((owned.result as any).status).toBe('requires_user')
+    expect(parsed(owned).status).toBe('requires_user')
     expect(w.fetches.length).toBe(1)
   })
   for (const options of [{ decision_routing: false, typesafe_api_key: FAKE_KEY }, { enabled: false, typesafe_api_key: FAKE_KEY }, {}]) {
@@ -130,7 +135,7 @@ describe('decision plugin integration', () => {
       on('prompt.compose', () => ({ sections: [] }))
       expect((await $.prompt.compose(promptArgs([DECISION_TOOL]))).sections.length).toBe(0)
       const result = await $.tool.call({ tool: DECISION_TOOL, ...input() } as never)
-      expect((result.result as any).status).toBe('unavailable')
+      expect(parsed(result).status).toBe('unavailable')
       expect(w.fetches.length).toBe(0)
     })
   }
@@ -142,15 +147,15 @@ describe('decision plugin integration', () => {
     await clock.settle()
     await clock.advance(2500)
     const result = await called
-    expect((result.result as any).status).toBe('unavailable')
-    expect((result.result as any).reason).toBe('jev timeout')
+    expect(parsed(result).status).toBe('unavailable')
+    expect(parsed(result).reason).toBe('jev timeout')
   })
   test('confidence settings apply immediately and logging stays off by default', { options: { typesafe_api_key: FAKE_KEY } }, async ($, on) => {
     mock.clock(on); memoryStore(on)
     const w = world(on, () => ({ status: 200, body: answer() }))
     await $.command.run({ command: 'jev-model', args: 'set decision_confidence_threshold 0.95' })
     const result = await $.tool.call({ tool: DECISION_TOOL, ...input() } as never)
-    expect((result.result as any).status).toBe('uncertain')
+    expect(parsed(result).status).toBe('uncertain')
     expect(w.written.size).toBe(0)
   })
 })

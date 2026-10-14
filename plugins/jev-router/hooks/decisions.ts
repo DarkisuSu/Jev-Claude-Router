@@ -52,6 +52,10 @@ export type DecisionResult = {
   uncertain?: string[]
   model?: string
 }
+// A tool's result reaches the engine as text (or content blocks), never as an
+// object: the decision is returned as JSON the assistant reads.
+export const decisionText = (result: DecisionResult): string => JSON.stringify(result)
+
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
 const description = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0 && value.length <= 1000
 const probability = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1

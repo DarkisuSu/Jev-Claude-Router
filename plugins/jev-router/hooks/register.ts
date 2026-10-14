@@ -25,7 +25,7 @@ import { cacheAdvice, cacheEvidence, observeUsage, resetCache, withContext, type
 import { SHARED, parseSetting, settingValue, sharedConfig } from './settings'
 import { JevError, route, type RouteResult, type Send } from './router'
 import { EMPTY_ATTEMPT, recentContext, routingFacts, scrubText, type AttemptFacts } from './awareness'
-import { DECISION_TOOL, DECISION_DESCRIPTION, DECISION_INSTRUCTIONS, DECISION_SCHEMA, prepareDecision, evaluateDecision } from './decisions'
+import { DECISION_TOOL, DECISION_DESCRIPTION, DECISION_INSTRUCTIONS, DECISION_SCHEMA, decisionText, prepareDecision, evaluateDecision } from './decisions'
 import {
   BODY_CHARS,
   assembleIndex,
@@ -891,16 +891,16 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'mcp__jev-router__decide' }, async ($, e) => {
     const input = { decision_owner: e.decision_owner, authority: e.authority, state: e.state, questions: e.questions }
     const prepared = prepareDecision(input, [config.key])
-    if ('status' in prepared) return { result: prepared }
-    if (!config.enabled || !config.key || !config.decisionRouting) return { result: { status: 'unavailable', reason: !config.key ? 'no-key' : 'decision-routing-disabled' } }
+    if ('status' in prepared) return { result: decisionText(prepared) }
+    if (!config.enabled || !config.key || !config.decisionRouting) return { result: decisionText({ status: 'unavailable', reason: !config.key ? 'no-key' : 'decision-routing-disabled' }) }
     if (!S.hiddenLoaded) await loadHidden($)
     const started = await $.clock.now()
     const result = await evaluateDecision(prepared, config.model, config.decisionConfidence, sender($, started + config.timeoutMs))
     // Question ids, rubrics, facts, options and answers are model-authored text:
     // keep only counts and numeric call metadata in the optional log.
     await log($, { type: 'decision', outcome: result.status, question_count: Object.keys(prepared.questions).length, uncertain_count: result.uncertain?.length ?? 0, threshold: config.decisionConfidence, total_ms: (await $.clock.now()) - started })
-    return { result }
-  }).catch(() => ({ result: { status: 'unavailable', reason: 'decision-hook-failed' } }))
+    return { result: decisionText(result) }
+  }).catch(() => ({ result: decisionText({ status: 'unavailable', reason: 'decision-hook-failed' }) }))
 
   on('prompt.submit', async ($, e, next) => {
     await checkSession($)
