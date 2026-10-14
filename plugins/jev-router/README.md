@@ -95,6 +95,13 @@ The log never holds the API key, request headers, prompt text or skill text.
 
 The router never touches Claude's credentials. Jev requests go to `api.typesafe.ai` without them. Each turn records whether `$.session.usage()` reported rate-limit windows, which Claude Code reports only on a subscription.
 
+## Branches and releases
+
+- **`master`** holds releases only. It is always the latest release, and installs are pinned to it (`--marketplace DarkisuSu/Jev-Claude-Router#master`).
+- **`development`** holds every change. Work and test there; a release is a merge of `development` into `master`.
+- The version is the `version` in `plugin.json`. It is raised on `development` as part of a release, and `master` then carries it. Versions are not marked with tags: a version is what `master` held after its merge. (The `v0.3.0` tag predates this rule and is left as it is; no new tags are made.)
+- This section is kept identical on every branch. A change to these rules is made on `development` and merged into `master` in the same step.
+
 ## Develop
 
 ```
