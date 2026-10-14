@@ -5,6 +5,7 @@ import {
   decide,
   familyOf,
   learn,
+  noteContext,
   planStep,
   type Available,
   type Caps,
@@ -12,9 +13,16 @@ import {
   type Fallback,
   type Family,
   type RoutingMode,
+  type Plan,
+  type Step,
+  type Effort,
 } from './model'
-import { DEFAULT_EFFORT_LEVELS, ENDPOINT } from './questions'
+import { learnOutput, pairCost, type OutputStats } from './cost'
+import { ENDPOINT } from './questions'
+import { cacheAdvice, cacheEvidence, observeUsage, resetCache, withContext, type CacheState, type CacheAdvice, type UsageLike } from './cache'
+import { SHARED, parseSetting, settingValue, sharedConfig } from './settings'
 import { JevError, route, type RouteResult, type Send } from './router'
+import { EMPTY_ATTEMPT, recentContext, routingFacts, scrubText, type AttemptFacts } from './awareness'
 import {
   BODY_CHARS,
   assembleIndex,
@@ -32,6 +40,8 @@ const INJECT_CHARS = 20000
 const LOG_DIR_NAME = 'jev-router-jev-local'
 const KEPT_TURNS = 20
 const CAPS_KEY = 'caps'
+// Average output per main request at each effort (numbers only), across sessions.
+const OUTPUTS_KEY = 'outputs'
 const PROBE_TEXT = 'Reply with exactly: OK'
 // A model id no account has: the probe's check that a failed request can be
 // sent again on the session's own model.
@@ -48,10 +58,14 @@ type Config = {
   timeoutMs: number
   maxPromptChars: number
   routing: RoutingMode
-  modelThreshold: number
-  effortThreshold: number
   fallback: Fallback
+  feasibleThreshold: number
+  autoProbe: boolean
   effortLevels: [string, string, string]
+  modelDescriptions: Record<string, string>
+  cache: ReturnType<typeof sharedConfig>['cache']
+  cost: ReturnType<typeof sharedConfig>['cost']
+  awareness: ReturnType<typeof sharedConfig>['awareness']
   resetRequested: boolean
   writeLog: boolean
 }
@@ -68,13 +82,11 @@ export const readConfig = (o: PluginOptions): Config => ({
   fitsThreshold: num(o.fits_threshold, 0.3, 0, 1),
   resetRequested: o.reset_to_defaults === true,
   writeLog: o.write_log === true,
-  effortLevels: [...DEFAULT_EFFORT_LEVELS],
+  ...sharedConfig(o),
   model: 'jev-latest',
   timeoutMs: 8000,
   maxPromptChars: 2000,
   routing: o.model_routing === 'on' ? 'on' : o.model_routing === 'off' ? 'off' : 'dry-run',
-  modelThreshold: num(o.model_threshold, 0.5, 0, 1),
-  effortThreshold: num(o.effort_threshold, 0.4, 0, 1),
   fallback: o.fallback_model === 'haiku' || o.fallback_model === 'sonnet' || o.fallback_model === 'opus' ? o.fallback_model : 'session',
 })
 
@@ -87,9 +99,6 @@ const HIDDEN: Record<string, HiddenSpec> = {
   timeout_ms: { kind: 'number', min: 1000, max: 9000, what: 'total time both Jev requests may take before the prompt goes on unrouted' },
   max_prompt_chars: { kind: 'number', min: 200, max: 20000, what: 'only the first N characters of a prompt are sent to Jev' },
   shortlist_size: { kind: 'number', min: 1, max: 12, what: 'how many top-ranked skills the second Jev request rereads' },
-  effort_low: { kind: 'text', chars: 500, what: 'what Jev is told low effort means' },
-  effort_medium: { kind: 'text', chars: 500, what: 'what Jev is told medium effort means' },
-  effort_high: { kind: 'text', chars: 500, what: 'what Jev is told high effort means' },
 }
 
 const BASE = readConfig({})
@@ -100,13 +109,9 @@ const hiddenDefault = (name: string): string | number => {
     case 'timeout_ms': return BASE.timeoutMs
     case 'max_prompt_chars': return BASE.maxPromptChars
     case 'shortlist_size': return BASE.shortlist
-    case 'effort_low': return BASE.effortLevels[0]
-    case 'effort_medium': return BASE.effortLevels[1]
-    default: return BASE.effortLevels[2]
+    default: return BASE.shortlist
   }
 }
-
-const level = (v: unknown, i: 0 | 1 | 2) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 500) : BASE.effortLevels[i])
 
 // A value stored out of range or of the wrong kind is ignored, so a bad
 // store never breaks routing.
@@ -115,7 +120,7 @@ function applyHidden(c: Config, h: Record<string, unknown>) {
   c.timeoutMs = num(h.timeout_ms, BASE.timeoutMs, 1000, 9000)
   c.maxPromptChars = Math.floor(num(h.max_prompt_chars, BASE.maxPromptChars, 200, 20000))
   c.shortlist = Math.floor(num(h.shortlist_size, BASE.shortlist, 1, 12))
-  c.effortLevels = [level(h.effort_low, 0), level(h.effort_medium, 1), level(h.effort_high, 2)]
+  Object.assign(c, sharedConfig(S.options, h))
 }
 
 // Prompts a person sent; deliveries, notifications and triggers are skipped.
@@ -191,10 +196,24 @@ const S: {
   hiddenLoaded: boolean
   probeQueue: Probe[]
   pendingProbe?: Probe
+  // Probe subagents started (by agent id), whose replies are kept out of the
+  // conversation, and the families probed automatically in this load.
+  probeAgents: Set<string>
+  autoProbed: Set<Family>
   turnProbes: Map<string, Probe>
   failed: Set<Family>
   lastStep?: Record<string, unknown>
   subscription?: boolean
+  options: PluginOptions
+  cache: CacheState
+  turnPlans: Map<string, { plan: Plan; advice?: CacheAdvice }>
+  // Context windows Claude Code reported, for the session model only.
+  windows: Partial<Record<Family, number>>
+  outputs: OutputStats
+  executed?: { model: string; effort?: string | number }
+  attempts: Map<string, AttemptFacts>
+  lastAttempt?: AttemptFacts
+  mainTurn?: string
 } = {
   config: readConfig({}),
   writes: Promise.resolve(),
@@ -206,8 +225,92 @@ const S: {
   hidden: {},
   hiddenLoaded: false,
   probeQueue: [],
+  probeAgents: new Set(),
+  autoProbed: new Set(),
   turnProbes: new Map(),
   failed: new Set(),
+  options: {},
+  cache: {},
+  turnPlans: new Map(),
+  windows: {},
+  outputs: {},
+  attempts: new Map(),
+}
+
+// Conversation facts never go to $.store. session.end fires on clear/resume;
+// the id check also covers hosts that replace a conversation without reloading.
+function clearConversation(why: string, sessionId?: string) {
+  S.cache = resetCache(S.cache, why, sessionId)
+  S.nextDecision = undefined
+  S.pending = undefined
+  S.pendingProbe = undefined
+  S.probeQueue = []
+  S.turnDecisions.clear()
+  S.turnSteps.clear()
+  S.turnPlans.clear()
+  S.turnProbes.clear()
+  S.failed.clear()
+  S.lastStep = undefined
+  S.executed = undefined
+  S.attempts.clear()
+  S.lastAttempt = undefined
+  S.mainTurn = undefined
+}
+
+async function checkSession($: EngineInterface) {
+  const id = await $.session.id()
+  if (S.cache.sessionId && S.cache.sessionId !== id) clearConversation('different-session', id)
+  else S.cache = { ...S.cache, sessionId: id }
+}
+
+async function readContext($: EngineInterface) {
+  let window: number | undefined
+  try {
+    const usage = await $.session.usage()
+    S.cache = withContext(S.cache, usage.context.tokens)
+    S.subscription = usage.rateLimits.length > 0
+    window = usage.context.window
+  } catch {
+    S.cache = withContext(S.cache, undefined)
+  }
+  // The reported window is the session model's; a failure here costs only it.
+  try {
+    const family = familyOf(await $.session.model())
+    if (family && typeof window === 'number' && Number.isFinite(window) && window > 0) S.windows = { ...S.windows, [family]: window }
+  } catch {
+    // No window known.
+  }
+}
+
+async function recordStep($: EngineInterface, usage: UsageLike | null | undefined, sent: { model: string; effort?: string | number }, requestAt: number, entry: Record<string, unknown>) {
+  S.cache = observeUsage(S.cache, usage, sent, requestAt)
+  S.executed = usage?.model ? { model: usage.model, effort: usage.model === sent.model ? sent.effort : undefined } : undefined
+  entry.observed_usage = usage ? { model: usage.model, input_tokens: usage.input_tokens, output_tokens: usage.output_tokens, cache_read_input_tokens: usage.cache_read_input_tokens, cache_creation_input_tokens: usage.cache_creation_input_tokens } : null
+  entry.request_started_at = requestAt
+  entry.answered_by = usage?.model
+  entry.effort_source = 'requested-not-confirmed'
+  const turnId = String(entry.turn_id)
+  const previous = S.attempts.get(turnId) ?? { ...EMPTY_ATTEMPT }
+  const facts: AttemptFacts = { ...previous, modelRequestFailed: previous.modelRequestFailed || String(entry.fallback ?? '').startsWith('routed-request-failed') }
+  S.attempts.set(turnId, facts)
+  S.lastAttempt = facts
+  entry.attempt_facts = facts
+  if (usage?.model) await learnStep($, { model: usage.model, effort: usage.model === sent.model ? sent.effort : undefined }, usage.model === sent.model, 'main-step')
+  if (usage?.model) await noteContextSeen($, usage.model, usage)
+  if (entry.type === 'step' && usage?.model === sent.model) {
+    const outputs = learnOutput(S.outputs, sent.effort, usage.output_tokens)
+    if (outputs) {
+      S.outputs = outputs
+      try {
+        await $.store.set(OUTPUTS_KEY, outputs)
+      } catch {
+        // Kept for this session only.
+      }
+    }
+  }
+  S.lastStep = entry
+  S.turnSteps.set(String(entry.turn_id), entry)
+  await log($, entry)
 }
 
 async function logFile($: EngineInterface) {
@@ -344,17 +447,35 @@ async function refreshModels($: EngineInterface) {
 async function loadHidden($: EngineInterface) {
   try {
     S.hidden = ((await $.store.get(HIDDEN_KEY)) ?? {}) as Record<string, unknown>
-    applyHidden(S.config, S.hidden)
   } catch {
     // Defaults stand.
   }
+  applyHidden(S.config, S.hidden)
   S.hiddenLoaded = true
 }
 
-// Validates and stores one hidden setting; it applies at once.
+const allNames = () => [...Object.keys(SHARED), ...Object.keys(HIDDEN)].join(', ')
+
+// Validates and saves one setting in its own home; it applies at once.
 async function setHidden($: EngineInterface, name: string, raw: string | undefined) {
+  if (!S.hiddenLoaded) await loadHidden($)
+  const shared = SHARED[name]
+  if (shared) {
+    const value = settingValue(S.options, name, S.hidden)
+    if (raw === undefined) return `jev-router: ${name} = ${String(value)} (default ${String(shared.default)}). Use /jev-model set ${name} <value>.`
+    const parsed = parseSetting(name, raw)
+    if (parsed === undefined) {
+      const hint = shared.options?.join('|') ?? (shared.kind === 'text' ? '1 to 500 characters' : shared.kind === 'boolean' ? 'true|false' : `${shared.min} to ${shared.max}${shared.integer ? ', whole numbers' : ''}`)
+      return `jev-router: invalid ${name}; use ${hint}. Nothing changed.`
+    }
+    if (shared.where === 'page') return setShared($, name, parsed)
+    S.hidden = { ...S.hidden, [name]: parsed }
+    await $.store.set(HIDDEN_KEY, S.hidden)
+    applyHidden(S.config, S.hidden)
+    return `jev-router: ${name} = ${String(parsed)} (default ${String(shared.default)}). Applied now.`
+  }
   const spec = HIDDEN[name]
-  if (!spec) return `jev-router: unknown setting "${name}". Settings: ${Object.keys(HIDDEN).join(', ')}.`
+  if (!spec) return `jev-router: unknown setting "${name}". Settings: ${allNames()}.`
   if (raw === undefined) return `jev-router: ${name} = ${String(S.hidden[name] ?? hiddenDefault(name))} (default ${String(hiddenDefault(name))}). Use /jev-model set ${name} <value>.`
   let value: string | number
   if (spec.kind === 'number') {
@@ -374,23 +495,41 @@ async function setHidden($: EngineInterface, name: string, raw: string | undefin
 }
 
 async function unsetHidden($: EngineInterface, name: string) {
-  if (!HIDDEN[name]) return `jev-router: unknown setting "${name}". Settings: ${Object.keys(HIDDEN).join(', ')}.`
+  if (!S.hiddenLoaded) await loadHidden($)
+  const shared = SHARED[name]
+  if (shared?.where === 'page') return setShared($, name, shared.default)
+  if (!shared && !HIDDEN[name]) return `jev-router: unknown setting "${name}". Settings: ${allNames()}.`
   const { [name]: _gone, ...rest } = S.hidden
   S.hidden = rest
   if (Object.keys(rest).length > 0) await $.store.set(HIDDEN_KEY, rest)
   else await $.store.delete(HIDDEN_KEY)
   applyHidden(S.config, S.hidden)
-  return `jev-router: ${name} is back to its default (${String(hiddenDefault(name))}).`
+  return `jev-router: ${name} is back to its default (${String(shared ? shared.default : hiddenDefault(name))}).`
 }
 
 function hiddenText() {
+  const row = (name: string, value: unknown, fallback: unknown, what: string, range = '') =>
+    `${name} = ${String(value)}${value === fallback ? '  [default]' : `  [changed; default ${String(fallback)}]`}\n    ${what}${range}`
   return [
-    'jev-router settings kept off the settings page (change with /jev-model set <name> <value>, restore with /jev-model unset <name>):',
-    ...Object.entries(HIDDEN).map(([name, spec]) => {
-      const changed = S.hidden[name] !== undefined
-      return `${name} = ${String(changed ? S.hidden[name] : hiddenDefault(name))}${changed ? `  [changed; default ${String(hiddenDefault(name))}]` : '  [default]'}\n    ${spec.what}${spec.min !== undefined ? ` (${spec.min} to ${spec.max})` : ''}`
-    }),
+    'jev-router settings. Change with /jev-model set <name> <value>, restore with /jev-model unset <name>, all with /jev-model defaults.',
+    'On the settings page:',
+    ...Object.entries(SHARED).filter(([, spec]) => spec.where === 'page').map(([name, spec]) => row(name, settingValue(S.options, name, S.hidden), spec.default, spec.what)),
+    'Kept off the page (saved in $.store):',
+    ...Object.entries(SHARED).filter(([, spec]) => spec.where === 'store').map(([name, spec]) => row(name, settingValue(S.options, name, S.hidden), spec.default, spec.what)),
+    ...Object.entries(HIDDEN).map(([name, spec]) => row(name, S.hidden[name] ?? hiddenDefault(name), hiddenDefault(name), spec.what, spec.min !== undefined ? ` (${spec.min} to ${spec.max})` : '')),
   ].join('\n')
+}
+
+// A settings-page value, saved through /config.
+async function setShared($: EngineInterface, name: string, value: string | number | boolean) {
+  const rows = await $.config.list()
+  const row = rows.find(r => r.key.endsWith(`.${name}`) && r.key.includes($.plugin.name))
+  if (!row) return `jev-router: no /config row for ${name}; nothing changed. Reload the plugin and use its settings.`
+  if (row.isLocked) return `jev-router: ${name} is locked; nothing changed.`
+  await $.config.set({ key: row.key, value: value as never })
+  S.options = { ...S.options, [name]: value }
+  applyHidden(S.config, S.hidden)
+  return `jev-router: ${name} = ${String(settingValue(S.options, name, S.hidden))}. Applied now and saved to the settings page.`
 }
 
 // Probe results hold for one Claude Code version; an update asks for a new probe.
@@ -402,7 +541,17 @@ async function loadCaps($: EngineInterface) {
   } catch {
     S.caps = undefined
   }
+  try {
+    const outputs = await $.store.get(OUTPUTS_KEY)
+    S.outputs = outputs && typeof outputs === 'object' ? (outputs as OutputStats) : {}
+  } catch {
+    S.outputs = {}
+  }
 }
+
+// The cache settings with what this session shows: a subscription caches
+// for an hour.
+const cacheNow = () => ({ ...S.config.cache, subscription: S.subscription === true })
 
 async function saveCaps($: EngineInterface, update: (caps: Caps) => Caps) {
   const caps = update(S.caps ?? { version: S.version, families: {} })
@@ -420,6 +569,79 @@ async function learnStep($: EngineInterface, step: { model: string; effort?: unk
   if (!S.version) await loadCaps($)
   const base = S.caps ?? { version: S.version, families: {} }
   const next = learn(base, step as { model: string; effort?: string | number }, answered, source, new Date().toISOString())
+  if (next) await saveCaps($, () => next)
+}
+
+// Starts one tiny background subagent on a family's alias: the engine
+// resolves the alias (agent.spawn answers the full id) and the subagent's
+// first step shows effort support. Its reply is kept out of the conversation.
+async function probeFamily($: EngineInterface, family: Family, alias: string): Promise<string> {
+  try {
+    const r = await $.agent.spawn({ prompt: PROBE_TEXT, description: 'jev-router model probe', model: alias })
+    if (r.deny !== undefined) return `${family}: refused (${r.deny})`
+    if (r.agentId) S.probeAgents.add(r.agentId)
+    await learnStep($, { model: r.model }, false, 'probe-spawn')
+    return familyOf(r.model) && r.model.toLowerCase() !== family
+      ? `${family}: ${alias} resolves to ${r.model}; its subagent is running`
+      : `${family}: subagent started; its full id is learned from its first step`
+  } catch (err) {
+    return `${family}: could not start a subagent (${err instanceof Error ? err.message.slice(0, 120) : 'error'}); switch to it once with /model instead`
+  }
+}
+
+const isKnown = (family: Family) => {
+  const known = S.caps?.families[family]
+  return Boolean(known?.id && known.ok && known.effort !== undefined)
+}
+
+// Probes, without being asked, each listed family whose id or effort support
+// is not known (first use, a Claude Code update) or that the caller names (a
+// routed request failed on it). Each family at most once per load.
+async function autoProbe($: EngineInterface, why: string, only?: Family) {
+  if (!S.config.autoProbe || S.config.routing === 'off') return
+  if (S.available.source === 'not-read') await refreshModels($)
+  if (!S.version) await loadCaps($)
+  const due = (Object.entries(S.available.models) as [Family, string][])
+    .filter(([family]) => (only ? family === only : !isKnown(family)) && !S.autoProbed.has(family))
+  if (due.length === 0) return
+  const lines: string[] = []
+  for (const [family, alias] of due) {
+    S.autoProbed.add(family)
+    lines.push(await probeFamily($, family, alias))
+  }
+  await log($, { type: 'probe', kind: 'auto', why, families: due.map(([f]) => f), result: lines })
+  $.ui.toast(`jev-router: learning ${due.map(([f]) => f).join(', ')} (${why}; one tiny background request each)`)
+}
+
+// The session's model as the full id the caps know// The session's model as the full id the caps know, before a response was seen.
+async function sessionStep($: EngineInterface): Promise<Step | undefined> {
+  try {
+    const family = familyOf(await $.session.model())
+    const id = family ? S.caps?.families[family]?.id : undefined
+    return id ? { model: id } : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// The tiers a decision may pick: listed by this Claude Code, not failed this
+// session, and either the current one or learned (id seen answering, effort
+// support known), since the engine refuses a bare alias.
+const routableFamilies = (current: Step | undefined): Family[] =>
+  (Object.keys(S.available.models) as Family[]).filter(family => {
+    if (S.failed.has(family)) return false
+    if (family === familyOf(current?.model)) return true
+    const known = S.caps?.families[family]
+    return Boolean(known?.id && known.ok && known.effort !== undefined)
+  })
+
+// Records the context a response came back over, as evidence of what that
+// model holds (main and subagent responses alike).
+async function noteContextSeen($: EngineInterface, model: string, usage: UsageLike) {
+  const parts = [usage.input_tokens, usage.cache_read_input_tokens, usage.cache_creation_input_tokens]
+  if (!parts.every(n => typeof n === 'number' && Number.isFinite(n))) return
+  const total = (parts as number[]).reduce((a, b) => a + b, 0)
+  const next = S.caps ? noteContext(S.caps, model, total) : undefined
   if (next) await saveCaps($, () => next)
 }
 
@@ -489,7 +711,7 @@ async function finishRound($: EngineInterface, why: string) {
 async function setOption($: EngineInterface, field: string, value: string) {
   const rows = await $.config.list()
   const row = rows.find(r => r.key.endsWith(`.${field}`) && r.key.includes($.plugin.name))
-  if (!row) return `jev-router: no /config row for ${field} was found; set it in the plugin's settings instead.`
+  if (!row) return `jev-router: no /config row for ${field} was found. Run /reload-plugins and try again, or set it in the plugin's settings.`
   await $.config.set({ key: row.key, value })
   return `jev-router: ${field} is now ${value} (saved to settings; the plugin reloads).`
 }
@@ -521,6 +743,10 @@ async function resetDefaults($: EngineInterface): Promise<string[]> {
   } catch {
     // Nothing stored.
   }
+  for (const [field, spec] of Object.entries(manifest.userConfig ?? {})) {
+    if (!KEPT_ON_RESET.has(field) && spec.default !== undefined) S.options = { ...S.options, [field]: spec.default as string | number | boolean }
+  }
+  Object.assign(S.config, readConfig(S.options))
   applyHidden(S.config, S.hidden)
   const flag = rowOf('reset_to_defaults')
   if (flag && flag.value === true) await $.config.set({ key: flag.key, value: false as never })
@@ -543,31 +769,52 @@ function statusText() {
     ? `last step: ${String(S.lastStep.from_model)} → ${String(S.lastStep.sent_model)} (answered by ${String(S.lastStep.answered_by ?? '?')}), effort ${String(S.lastStep.from_effort ?? '-')} → ${String(S.lastStep.sent_effort ?? '-')} [${(S.lastStep.reasons as string[] | undefined)?.join(', ') ?? ''}]`
     : 'no routed step yet'
   return [
-    `jev-router model routing: ${c.routing} (Jev's confidence: model ≥ ${c.modelThreshold}, effort ≥ ${c.effortThreshold}; then the highest probability; fallback ${c.fallback})`,
+    `jev-router model routing: ${c.routing} (the cheapest tier/effort Jev judges ≥ ${c.feasibleThreshold} feasible; costed over ${c.cost.horizon} requests; fallback ${c.fallback} when Jev gives no answer)`,
     `skills: gate ≥ ${c.gateThreshold}, fits ≥ ${c.fitsThreshold}, shortlist ${c.shortlist}, load mode ${c.mode}`,
     `models from this Claude Code (${S.available.source}): ${fams}`,
     `log: ${c.writeLog ? 'on' : 'off'}`,
     `learned: ${caps}`,
     `failed this session: ${[...S.failed].join(', ') || 'none'}`,
     `subscription rate limits seen: ${S.subscription === undefined ? 'not yet' : S.subscription ? 'yes' : 'no'}`,
+    `costs: cache TTL ${c.cache.ttl}${c.cache.ttl === 'auto' ? ` (${S.subscription ? '1h, subscription' : '5m until a subscription or a 1h write is seen'})` : ''}; output per request by effort ${(['low', 'medium', 'high'] as const).map(e => `${e} ${S.outputs[e] ? `${S.outputs[e]!.avg} tokens seen` : `ratio ${c.cost.ratios[e]}`}`).join(', ')}`,
+    `Jev context: recent excerpts ${c.awareness.enabled ? 'on' : 'off'} (${c.awareness.messages} messages, ${c.awareness.maxChars} chars)`,
     last,
-    'commands: /jev-model on | dry-run | off | fallback <session|haiku|sonnet|opus> | settings | set | unset | defaults | probe | reset | models',
+    ...(S.lastStep ? [cacheText(S.lastStep)] : []),
+    'commands: /jev-model on | dry-run | off | cache | fallback <session|haiku|sonnet|opus> | settings | set | unset | defaults | probe | reset | models',
   ].join('\n')
 }
 
+function feasibleText(step: Record<string, unknown>) {
+  const f = step.jev_feasible as Record<string, Record<string, number>> | undefined
+  if (!f || Object.keys(f).length === 0) return ''
+  return ` · feasibility ${Object.entries(f).map(([family, levels]) => `${family} ${Object.entries(levels).map(([e, v]) => `${e} ${v}`).join('/')}`).join(', ')} (Jev judgment, not a measured success rate)`
+}
+
+function cacheText(step: Record<string, unknown>) {
+  const advice = step.cache_advice as CacheAdvice | undefined
+  const observed = step.observed_usage as UsageLike | undefined
+  const recommendation = step.final_recommended as { model?: string; effort?: string | number } | undefined
+  const jev = step.jev_recommended as { how?: string; usd?: number } | undefined
+  const estimate = advice?.estimate ?? advice?.effortEstimate
+  const cost = estimate ? `estimated switch premium ${estimate.switchingPremium.toFixed(6)} API-equivalent USD, breakeven ${estimate.breakevenTurns ?? 'never in this scenario'} future turns` : 'estimated switch cost/breakeven unknown'
+  return `final ${recommendation?.model ?? '?'}/${recommendation?.effort ?? '-'} · ${jev?.how ?? 'no decision'}${jev?.usd !== undefined ? ` ~$${jev.usd}` : ''} · cache ${advice?.evidence.status ?? 'unknown'} [${advice?.reason ?? 'unavailable'}/${advice?.effortReason ?? 'unavailable'}] · observed read/write ${observed?.cache_read_input_tokens ?? 'unknown'}/${observed?.cache_creation_input_tokens ?? 'unknown'} tokens · ${cost}${feasibleText(step)}`
+}
+
 export const register: Register = (on, options) => {
+  S.options = { ...options }
   S.config = readConfig(options)
   const config = S.config
   S.index = undefined
   S.hiddenLoaded = false
 
   on('session.start', async ($, e, next) => {
+    await checkSession($)
     await $.command.register({ name: 'jev-log', description: 'Show the last Jev router rounds and steps' })
     await $.command.register({ name: 'jev-index', description: 'Show the skills the Jev router can pick from' })
     await $.command.register({
       name: 'jev-model',
-      description: 'Jev model routing: status, on, dry-run, off, fallback, settings, set, unset, defaults, probe, reset, models',
-      argumentHint: 'status | on | dry-run | off | fallback <model> | settings | set <name> <value> | unset <name> | defaults | probe | reset | models',
+      description: 'Jev model routing: status, on, dry-run, off, cache, fallback, settings, set, unset, defaults, probe, reset, models',
+      argumentHint: 'status | on | dry-run | off | cache | fallback <model> | settings | set <name> <value> | unset <name> | defaults | probe | reset | models',
     })
     if (config.resetRequested) {
       try {
@@ -589,8 +836,7 @@ export const register: Register = (on, options) => {
       routing: config.routing,
       gate_threshold: config.gateThreshold,
       fits_threshold: config.fitsThreshold,
-      model_threshold: config.modelThreshold,
-      effort_threshold: config.effortThreshold,
+      feasibility_threshold: config.feasibleThreshold,
       fallback: config.fallback,
       claude_code: S.version,
       models: S.available.models,
@@ -601,7 +847,18 @@ export const register: Register = (on, options) => {
   })
 
   on('prompt.submit', async ($, e, next) => {
+    await checkSession($)
     const origin = e.origin as PromptOrigin | undefined
+
+    // A probe subagent's reply ("OK") would enter the conversation as another
+    // session's message and start a turn: it is kept out, with one short line.
+    if ((origin as { kind?: string } | undefined)?.kind === 'peer') {
+      const agent = [...S.probeAgents].find(id => e.text.includes(id))
+      if (agent) {
+        S.probeAgents.delete(agent)
+        return { drop: 'jev-router: model probe finished' }
+      }
+    }
 
     // The probe's own prompts: bind the next probe to the turn they start.
     const id = `${(await $.clock.now()).toString(36)}-${++S.roundSeq}`
@@ -651,8 +908,18 @@ export const register: Register = (on, options) => {
     const skills = (await ensureIndex($)).skills
     if (S.available.source === 'not-read') await refreshModels($)
     if (!S.version) await loadCaps($)
-    const families = config.routing === 'off' ? [] : Object.keys(S.available.models)
-    const sent = text.slice(0, config.maxPromptChars)
+    const sent = scrubText(text, [config.key]).slice(0, config.maxPromptChars)
+    let messages
+    if (config.awareness.enabled && config.awareness.maxChars > 0) {
+      try { messages = await $.session.messages() } catch { /* unknown; never reuse another session's transcript */ }
+    }
+    const recent = recentContext(messages, text, config.awareness, [config.key])
+    if (config.routing !== 'off') await readContext($)
+    // Before any response was seen (a fresh session, a plugin reload), the
+    // session model stands in for the current one so context costs are known.
+    const current = config.routing === 'off' ? undefined : S.executed ?? await sessionStep($)
+    const families = config.routing === 'off' ? [] : routableFamilies(current)
+    const facts = config.routing !== 'off' ? routingFacts(S.cache, current, S.caps, S.failed, S.lastAttempt, await $.clock.now(), cacheNow(), S.windows, S.executed ? 'last-response' : 'session-model') : undefined
 
     const result: RouteResult = await route(
       sent,
@@ -664,15 +931,21 @@ export const register: Register = (on, options) => {
         shortlist: config.shortlist,
         modelFamilies: families,
         effortLevels: config.effortLevels,
+        modelDescriptions: config.modelDescriptions,
+        recentContext: recent.text,
+        routingContext: facts,
       },
       sender($, deadline),
       () => $.clock.now(),
     )
 
-    const decision = decide(id, result.modelAnswer, result.effortAnswer, S.available, {
-      model: config.modelThreshold,
-      effort: config.effortThreshold,
-    })
+    // Jev judged each tier and effort; the cheapest feasible pair runs.
+    const evidence = cacheEvidence(S.cache, await $.clock.now(), cacheNow())
+    const decision = decide(id, result.feasible, families, (family: Family, effort: Effort) => {
+      const known = S.caps?.families[family]
+      const model = known?.id ?? (family === familyOf(current?.model) ? current?.model : undefined)
+      return pairCost(model, known?.effort, effort, current, evidence, S.outputs, config.cost)
+    }, config.feasibleThreshold)
     // A prompt typed during a turn joins that turn: its decision stands.
     if (!midTurn && config.routing !== 'off') {
       S.nextDecision = decision
@@ -717,13 +990,17 @@ export const register: Register = (on, options) => {
       selected: result.selected,
       delivery,
       model_routing: config.routing,
-      jev_model: result.modelAnswer,
-      jev_effort: result.effortAnswer,
+      jev_feasible: result.feasible,
+      cost_basis: config.routing !== 'off' ? { context_tokens: evidence.contextTokens ?? null, cache: evidence.status, ttl: evidence.ttlSource, horizon: config.cost.horizon, outputs: S.outputs } : undefined,
+      candidates: decision.candidates?.map(c => ({ pair: `${c.family}/${c.effort}`, ...c, family: undefined, effort: undefined })),
+      awareness: { source: recent.source, messages: recent.messages, chars: recent.text.length, truncated: recent.truncated },
       decision: {
         family: decision.family,
         effort: decision.effort,
-        model_reason: decision.modelReason,
-        effort_reason: decision.effortReason,
+        how: decision.how,
+        reason: decision.modelReason,
+        usd: decision.usd,
+        threshold: decision.feasibleThreshold,
       },
       jev_calls: result.calls,
       total_ms: (await $.clock.now()) - started,
@@ -737,6 +1014,17 @@ export const register: Register = (on, options) => {
 
   // The turn's id first appears here: bind the decision (or probe) to it.
   on('turn.start', async ($, e, next) => {
+    if ((e as { agentId?: string }).agentId !== undefined) return next(e)
+    await checkSession($)
+    S.mainTurn = e.turnId
+    await autoProbe($, 'first use on this Claude Code')
+    S.attempts.set(e.turnId, { ...EMPTY_ATTEMPT })
+    while (S.attempts.size > KEPT_TURNS) {
+      const oldest = S.attempts.keys().next().value
+      if (oldest === undefined) break
+      S.attempts.delete(oldest)
+    }
+    S.turnPlans.delete(e.turnId)
     if (S.pendingProbe) {
       S.turnProbes.set(e.turnId, S.pendingProbe)
       S.pendingProbe = undefined
@@ -747,6 +1035,9 @@ export const register: Register = (on, options) => {
         const oldest = S.turnDecisions.keys().next().value
         if (oldest === undefined) break
         S.turnDecisions.delete(oldest)
+        S.turnPlans.delete(oldest)
+        S.turnSteps.delete(oldest)
+        S.attempts.delete(oldest)
       }
     }
     return next(e)
@@ -757,12 +1048,15 @@ export const register: Register = (on, options) => {
     // teach which full id each family resolves to (a probe spawns them).
     if (e.agentId !== undefined) {
       const result = yield* next(e)
-      await learnStep($, e, result.usage != null, 'subagent-step')
+      if (result.usage?.model === e.model) await learnStep($, e, true, 'subagent-step')
+      if (result.usage?.model) await noteContextSeen($, result.usage.model, result.usage)
       return result
     }
+    await checkSession($)
 
     const probe = S.turnProbes.get(e.turnId)
     if (probe) {
+      let requestAt = await $.clock.now()
       let first
       try {
         first = yield* next({ ...e, model: PROBE_BAD_MODEL })
@@ -771,21 +1065,63 @@ export const register: Register = (on, options) => {
       }
       if (first?.usage) {
         await saveCaps($, c => ({ ...c, retryOk: false }))
+        await recordStep($, first.usage, { model: PROBE_BAD_MODEL, effort: e.effort }, requestAt, { type: 'probe', kind: 'retry', turn_id: e.turnId, sent_model: PROBE_BAD_MODEL, sent_effort: e.effort, retry_ok: false })
         return first
       }
+      requestAt = await $.clock.now()
       const again = yield* next(e)
       await saveCaps($, c => ({ ...c, retryOk: again.usage !== null }))
-      await log($, { type: 'probe', kind: 'retry', retry_ok: again.usage !== null })
+      await recordStep($, again.usage, e, requestAt, { type: 'probe', kind: 'retry', turn_id: e.turnId, sent_model: e.model, sent_effort: e.effort, retry_ok: again.usage !== null })
       return again
     }
 
     const decision = S.turnDecisions.get(e.turnId)
-    const plan = planStep(e, decision, config.routing, S.caps, S.failed, config.fallback)
+    let frozen = S.turnPlans.get(e.turnId)
+    if (!frozen) {
+      await readContext($)
+      // Actual response history supplies evidence, never a cache routing veto.
+      // Preserve the original planStep confidence/capability/fallback behavior.
+      const actual = S.executed
+      const baseline = actual && decision
+        ? { ...e, model: actual.model, effort: actual.effort ?? (actual.model === e.model ? e.effort : undefined) }
+        : e
+      const ideal = planStep(e, decision, config.routing === 'off' ? 'off' : 'on', S.caps, S.failed, config.fallback)
+      const model = ideal.model
+      const proposedEffort = ideal.effort
+      // Never introduce xhigh/max/numeric effort from a prior request. Such
+      // engine-provided levels may pass through unchanged on this step only.
+      const effort = proposedEffort === e.effort || proposedEffort === undefined || ['low', 'medium', 'high'].includes(String(proposedEffort)) ? proposedEffort : e.effort
+      const advice = decision && config.routing !== 'off'
+        ? cacheAdvice(baseline, { model, effort }, S.cache, await $.clock.now(), cacheNow())
+        : undefined
+      frozen = {
+        plan: {
+          model, effort, changed: false,
+          wouldModel: model !== e.model ? model : undefined,
+          wouldEffort: effort !== e.effort ? String(effort ?? 'none') : undefined,
+          reasons: [...(config.routing === 'dry-run' ? ['dry-run'] : []), ...ideal.reasons],
+        }, advice,
+      }
+      S.turnPlans.set(e.turnId, frozen)
+      while (S.turnPlans.size > KEPT_TURNS) {
+        const oldest = S.turnPlans.keys().next().value
+        if (oldest === undefined) break
+        S.turnPlans.delete(oldest)
+        S.turnSteps.delete(oldest)
+        S.attempts.delete(oldest)
+      }
+    }
+    const final = frozen.plan
+    const apply = config.routing === 'on' && decision !== undefined
+    const plan = apply
+      ? { ...final, changed: final.model !== e.model || final.effort !== e.effort }
+      : { ...final, model: e.model, effort: e.effort, changed: false }
     const target = familyOf(plan.model)
     const entry: Record<string, unknown> = {
       type: 'step',
       round: decision?.round,
       turn: e.turnId.slice(-8),
+      turn_id: e.turnId,
       index: e.index,
       routing: config.routing,
       from_model: e.model,
@@ -795,51 +1131,101 @@ export const register: Register = (on, options) => {
       would_model: plan.wouldModel,
       would_effort: plan.wouldEffort,
       reasons: plan.reasons,
+      jev_recommended: decision ? { model: decision.family, effort: decision.effort, how: decision.how ?? decision.modelReason, usd: decision.usd } : undefined,
+      jev_feasible: decision?.feasible,
+      final_recommended: { model: final.model, effort: final.effort },
+      cache_advice: frozen.advice,
     }
-
+    let requestAt = await $.clock.now()
     if (!plan.changed) {
       const result = yield* next(e)
-      entry.answered_by = result.usage?.model
       entry.stop = result.stopReason
-      S.lastStep = entry
-      S.turnSteps.set(e.turnId, entry)
-      await learnStep($, e, result.usage != null, 'main-step')
-      await log($, entry)
+      await recordStep($, result.usage, e, requestAt, entry)
       return result
     }
 
     const sent = { ...e, model: plan.model, effort: plan.effort as typeof e.effort }
     let result
+    let failure: unknown
+    let streamed = false
     try {
-      result = yield* next(sent)
-    } catch {
-      result = undefined
+      const stream = next(sent)
+      let completed = false
+      try {
+        let item = await stream.next()
+        while (!item.done) {
+          streamed = true
+          yield item.value
+          item = await stream.next()
+        }
+        result = item.value
+        completed = true
+      } finally {
+        if (!completed) await stream.return(undefined as never)
+      }
+    } catch (err) {
+      failure = err
     }
     const failed = !next.signal.aborted && result?.usage == null && result?.stopReason == null
     if (failed) {
-      if (target) S.failed.add(target)
+      if (target) {
+        S.failed.add(target)
+        // Its id may have changed with an update: learn it again.
+        await autoProbe($, `a routed request to ${target} failed`, target)
+      }
       entry.fallback = 'routed-request-failed'
+      entry.failed_recommendation = entry.final_recommended
+      // Pin every remaining step to the fallback. Never retry the same bad
+      // target inside a tool loop or silently re-evaluate Jev's recommendation.
+      S.turnPlans.set(e.turnId, { plan: { model: e.model, effort: e.effort, changed: false, reasons: ['model:failed-this-session', 'fallback-pinned'] } })
       // Only where the probe saw a failed step sent again on the session's own model.
-      if (S.caps?.retryOk) {
+      if (S.caps?.retryOk && !streamed) {
+        requestAt = await $.clock.now()
         result = yield* next(e)
         entry.fallback = 'routed-request-failed: resent on the session model'
         entry.sent_model = e.model
         entry.sent_effort = e.effort
+        entry.final_recommended = { model: e.model, effort: e.effort }
+        entry.failed_cache_advice = entry.cache_advice
+        delete entry.cache_advice
       }
     }
-    entry.answered_by = result?.usage?.model
     entry.stop = result?.stopReason
-    S.lastStep = entry
-    S.turnSteps.set(e.turnId, entry)
-    await log($, entry)
-    if (!result) return yield* next(e)
+    await recordStep($, result?.usage, { model: String(entry.sent_model), effort: entry.sent_effort as typeof e.effort }, requestAt, entry)
+    if (!result) throw failure ?? new Error('jev-router: routed request failed; retry capability was not confirmed')
     return result
   })
 
   // A /model switch names the full id the alias resolved to.
   on('classic.PostModelSwitch', async ($, e, next) => {
+    await checkSession($)
+    // Only the id is learned. A /model choice is the session model, which is
+    // the fallback; Jev still judges every turn.
     await learnStep($, { model: e.to_model }, false, 'model-switch')
     return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('session.end', async ($, e, next) => {
+    clearConversation(`session-${e.reason}`)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('session.compact', async ($, e, next) => {
+    S.cache = resetCache(S.cache, 'compaction')
+    S.lastAttempt = undefined
+    S.attempts.clear()
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('tool.call', async ($, e, next) => {
+    const result = await next(e)
+    const meta = e as { agentId?: string; turnId?: string }
+    const turnId = meta.turnId ?? S.mainTurn
+    if (meta.agentId === undefined && turnId && S.attempts.has(turnId)) {
+      const facts = S.attempts.get(turnId)!
+      S.attempts.set(turnId, { ...facts, toolFailures: facts.toolFailures + (result.isError === true ? 1 : 0), deniedTools: facts.deniedTools + (result.deny !== undefined ? 1 : 0) })
+    }
+    return result
   }).catch(($, e, next) => next(e))
 
   // A skill the Skill tool loaded: the tool call runs for every invocation,
@@ -859,11 +1245,9 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     // A subagent's turn ending is not the person's turn ending.
     if ((e as { agentId?: string }).agentId !== undefined) return next(e)
-    try {
-      S.subscription = (await $.session.usage()).rateLimits.length > 0
-    } catch {
-      // Left as it was.
-    }
+    S.lastAttempt = S.attempts.get(e.turnId) ?? S.lastAttempt
+    if (S.mainTurn === e.turnId) S.mainTurn = undefined
+    await readContext($)
     await finishRound($, 'turn-complete')
 
     // One line under the answer: which model really answered the turn, what
@@ -871,17 +1255,20 @@ export const register: Register = (on, options) => {
     const decision = S.turnDecisions.get(e.turnId)
     const step = S.turnSteps.get(e.turnId)
     if (!decision || config.routing === 'off' || e.isAborted) return next(e)
-    const answered = e.usage?.model ?? 'unknown'
+    const answered = step?.answered_by ?? e.usage?.model ?? 'unknown'
     const sent = step?.sent_model ? String(step.sent_model) : answered
     const effort = step?.sent_effort !== undefined ? `/${String(step.sent_effort)}` : ''
     const fellBack = ((step?.reasons as string[] | undefined) ?? []).find(x => x.startsWith('model:fallback-'))
+    const cost = decision.usd !== undefined ? ` ~$${decision.usd.toFixed(3)}/${config.cost.horizon} requests` : ', cost unknown'
     const jev = decision.family
-      ? `Jev chose ${decision.family}${decision.effort ? `/${decision.effort}` : ''}`
+      ? decision.how === 'none-feasible-most-capable'
+        ? `no pair judged feasible, most able ${decision.family}/${decision.effort}${cost}`
+        : `cheapest feasible ${decision.family}/${decision.effort}${cost}`
       : fellBack
         ? `fallback ${fellBack.slice('model:fallback-'.length)}`
-        : `Jev not confident (${decision.modelReason ?? 'none'}), session model kept`
+        : `no Jev answer (${decision.modelReason ?? 'none'}), session model kept`
     const note = config.routing === 'dry-run' ? ' · dry-run, nothing was switched' : ''
-    const text = `jev-router: answered by ${answered}${answered !== sent ? ` (sent ${sent})` : ''}${effort ? ` · effort ${effort.slice(1)}` : ''} · ${jev}${note}`
+    const text = `jev-router: answered by ${answered}${answered !== sent ? ` (sent ${sent})` : ''}${effort ? ` · requested effort ${effort.slice(1)}` : ''} · ${jev}${note}`
     // turn.complete shows any text that differs from the answer beneath it, so
     // the note alone is returned; the transcript's record is never rewritten.
     const res = await next(e)
@@ -889,6 +1276,7 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'jev-model' }, async ($, e) => {
+    if (!S.hiddenLoaded) await loadHidden($)
     const rawArgs = e.args.trim()
     if (/^settings?$/i.test(rawArgs)) return { text: hiddenText() }
     const setMatch = /^set\s+(\S+)(?:\s+([\s\S]+))?$/i.exec(rawArgs)
@@ -896,12 +1284,18 @@ export const register: Register = (on, options) => {
     const unsetMatch = /^unset\s+(\S+)$/i.exec(rawArgs)
     if (unsetMatch) return { text: await unsetHidden($, (unsetMatch[1] ?? '').toLowerCase()) }
     const arg = rawArgs.toLowerCase()
+    if (arg === 'cache') return { text: Object.keys(SHARED).filter(k => k.startsWith('cache_') || k.startsWith('cost_') || k.startsWith('effort_output_')).map(k => `${k} = ${String(settingValue(S.options, k, S.hidden))}`).join('\n') }
     if (arg === 'on' || arg === 'off' || arg === 'dry-run') {
       const note =
         arg === 'on' && !Object.values(S.caps?.families ?? {}).some(f => f?.ok)
           ? '\nNo model has passed /jev-model probe yet, so every step keeps the session model until one does.'
           : ''
-      return { text: (await setOption($, 'model_routing', arg)) + note }
+      const saved = await setOption($, 'model_routing', arg)
+      if (saved.includes('is now')) {
+        config.routing = arg
+        S.options = { ...S.options, model_routing: arg }
+      }
+      return { text: saved + note }
     }
     if (arg === 'defaults') {
       try {
@@ -942,29 +1336,13 @@ export const register: Register = (on, options) => {
       await refreshModels($)
       await loadCaps($)
       const lines: string[] = []
-      // One tiny background subagent per family: the engine resolves the
-      // alias (agent.spawn answers the full id) and its step shows effort support.
-      for (const [family, alias] of Object.entries(S.available.models)) {
-        const known = S.caps?.families[family as Family]
-        if (known?.id && known.ok && known.effort !== undefined) {
-          lines.push(`${family}: already known (${known.id})`)
+      // One tiny background subagent per family not known yet.
+      for (const [family, alias] of Object.entries(S.available.models) as [Family, string][]) {
+        if (isKnown(family)) {
+          lines.push(`${family}: already known (${S.caps!.families[family]!.id})`)
           continue
         }
-        try {
-          const r = await $.agent.spawn({ prompt: PROBE_TEXT, description: 'jev-router model probe', model: alias })
-          if (r.deny !== undefined) {
-            lines.push(`${family}: refused (${r.deny})`)
-            continue
-          }
-          await learnStep($, { model: r.model }, false, 'probe-spawn')
-          lines.push(
-            familyOf(r.model) && r.model.toLowerCase() !== family
-              ? `${family}: ${alias} resolves to ${r.model}; its subagent is running`
-              : `${family}: subagent started; its full id is learned from its first step`,
-          )
-        } catch (err) {
-          lines.push(`${family}: could not start a subagent (${err instanceof Error ? err.message.slice(0, 120) : 'error'}); switch to it once with /model instead`)
-        }
+        lines.push(await probeFamily($, family, alias))
       }
       if (lines.length === 0) return { text: 'jev-router: this Claude Code lists no Haiku, Sonnet or Opus model to probe.' }
       if (S.caps?.retryOk === undefined) {
@@ -994,17 +1372,18 @@ export const register: Register = (on, options) => {
         if (r.type === 'round') {
           const calls = (r.jev_calls ?? []).map((c: any) => `${c.step}:${c.status}/${c.ms}ms`).join(' ')
           const sel = (r.selected ?? []).map((s: any) => `${s.name}(fits ${s.fits})`).join(', ')
-          const m = r.jev_model ? ` | jev model ${r.jev_model.choice} (${r.jev_model.confidence})` : ''
-          const ef = r.jev_effort ? ` effort ${r.jev_effort.score} (${r.jev_effort.confidence})` : ''
-          const d = r.decision ? ` → ${r.decision.family ?? `keep[${r.decision.model_reason}]`}/${r.decision.effort ?? `keep[${r.decision.effort_reason}]`}` : ''
-          return `${time} round ${r.round} ${r.outcome}${r.reason ? ` [${r.reason}]` : ''}${sel ? ` skills ${sel}` : ''}${m}${ef}${d}${calls ? ` | ${calls}` : ''}`
+          const able = (r.candidates ?? []).filter((c: any) => c.feasible >= (r.decision?.threshold ?? 0)).length
+          const m = r.candidates ? ` | ${able}/${r.candidates.length} pairs feasible` : ''
+          const d = r.decision ? ` → ${r.decision.family ? `${r.decision.family}/${r.decision.effort} (${r.decision.how}${r.decision.usd !== undefined ? ` ~$${r.decision.usd}` : ''})` : `keep[${r.decision.reason}]`}` : ''
+          return `${time} round ${r.round} ${r.outcome}${r.reason ? ` [${r.reason}]` : ''}${sel ? ` skills ${sel}` : ''}${m}${d}${calls ? ` | ${calls}` : ''}`
         }
         if (r.type === 'step') {
-          return `${time} step #${r.index} ${r.routing}: ${r.from_model}/${r.from_effort ?? '-'} → sent ${r.sent_model}/${r.sent_effort ?? '-'}, answered by ${r.answered_by ?? '?'}${r.would_model || r.would_effort ? ` (would ${r.would_model ?? 'same'}/${r.would_effort ?? 'same'})` : ''} [${(r.reasons ?? []).join(', ')}]${r.fallback ? ` fallback: ${r.fallback}` : ''}`
+          return `${time} step #${r.index} ${r.routing}: Jev ${r.jev_recommended?.model ?? '?'}/${r.jev_recommended?.effort ?? '?'} → sent ${r.sent_model}/${r.sent_effort ?? '-'}, answered by ${r.answered_by ?? '?'} [${(r.reasons ?? []).join(', ')}]${r.fallback ? ` fallback: ${r.fallback}` : ''}\n  ${cacheText(r)}`
         }
         if (r.type === 'reset') return `${time} reset settings to defaults: ${(r.changed ?? []).join(', ') || 'nothing to change'}`
         if (r.type === 'load') return `${time} load ${r.skill} via ${r.via} (routed: ${r.routed})`
         if (r.type === 'turn') return `${time} turn ${r.round}: ${(r.skills ?? []).map((s: any) => `${s.skill}=${s.status}`).join(', ')}`
+        if (r.type === 'probe' && r.kind === 'auto') return `${time} probe auto (${r.why}): ${(r.result ?? []).join('; ')}`
         if (r.type === 'probe') return `${time} probe ${r.kind} ${r.family ?? ''} ${r.sent_model ?? ''} ok=${r.ok ?? r.retry_ok} answered by ${r.answered_by ?? '-'}`
         return `${time} ${r.type}`
       } catch {

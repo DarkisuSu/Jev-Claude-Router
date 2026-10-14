@@ -43,10 +43,12 @@ const step = async ($: Engine, turnId: string, index: number, extra: Record<stri
   return r.value
 }
 
-const answers = (choice: string, confidence: number, effort = { score: 2, confidence: 0.9 }) =>
+// Jev's feasibility per 'tier::effort'; every other pair asked is judged
+// unable (0.1).
+const answers = (feasible: Record<string, number> = {}) =>
   (q: Record<string, unknown>) =>
     'acts_on_user_system' in q
-      ? { status: 200, body: rankWide(0.9, 'speckit-specify', { choice, confidence }, effort) }
+      ? { status: 200, body: rankWide(0.9, 'speckit-specify', feasible, q) }
       : { status: 200, body: rerank(q, { 'speckit-specify': 0.2 }) }
 
 const CAPS = {
@@ -65,13 +67,18 @@ const turn = async ($: Engine, w: World, text = PROMPT) => {
   return w
 }
 
+const ON = { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' }
+
 const steps = (w: World) => logLines(w).filter(l => l.type === 'step')
 
+// The session model is opus (world's default) and steps come as sonnet; opus
+// and haiku are learned. No context is known here, so pairs are ordered by
+// list price, then tier, then effort (unknown test ids: tier, then effort).
 describe('model routing', () => {
   test('dry-run: logs what Jev would send and sends the session model unchanged', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
-    const w = world(on, answers('opus', 0.9))
+    const w = world(on, answers({ 'opus::high': 0.9 }))
     const seen = bottom(on)
 
     await turn($, w)
@@ -83,13 +90,27 @@ describe('model routing', () => {
     expect(s?.would_model).toBe(OPUS)
     expect(s?.would_effort).toBe('high')
     expect(s?.reasons?.[0]).toBe('dry-run')
-    expect(logLines(w).find(l => l.type === 'round')?.decision).toEqual({ family: 'opus', effort: 'high' })
+    expect(logLines(w).find(l => l.type === 'round')?.decision).toEqual({ family: 'opus', effort: 'high', how: 'cheapest-feasible', threshold: 0.6 })
+  })
+
+  test('Jev is asked every routable tier at every effort, apart from cost', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, LEARNED)
+    const w = world(on, answers())
+    bottom(on)
+
+    await turn($, w)
+
+    const questions = JSON.parse(w.fetches[0]?.body ?? '{}').questions
+    expect(Object.keys(questions).filter(k => k.startsWith('feasible::'))).toEqual(['haiku', 'opus'].flatMap(f => ['low', 'medium', 'high'].map(e => `feasible::${f}::${e}`)))
+    expect(questions.model_tier).toBeUndefined()
+    expect(questions.effort_level).toBeUndefined()
   })
 
   test('on: every main step of the turn is sent with the learned full id and effort', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
-    const w = world(on, answers('opus', 0.9))
+    const w = world(on, answers({ 'opus::high': 0.9 }))
     const seen = bottom(on)
 
     await turn($, w)
@@ -102,97 +123,44 @@ describe('model routing', () => {
     expect(w.fetches.length).toBe(2)
   })
 
-  test('on: Jev may pick haiku for a hard-looking prompt; the router follows Jev, not length', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
+  test('on: the cheapest pair Jev judges feasible runs: a lower tier and a lower effort first', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
-    const w = world(on, answers('haiku', 0.8, { score: 0.1, confidence: 0.9 }))
+    const w = world(on, answers({ 'haiku::medium': 0.9, 'haiku::high': 0.95, 'opus::low': 0.99 }))
     const seen = bottom(on)
 
     await turn($, w, 'Refactor the entire payment ledger across all services and redesign its architecture.')
     await step($, 't1', 0)
 
-    expect(seen[0]).toEqual({ model: HAIKU, effort: 'low', agentId: undefined })
+    expect(seen[0]).toEqual({ model: HAIKU, effort: 'medium', agentId: undefined })
   })
 
-  test('on: below the threshold the session model stays (fallback session)', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
+  test('on: a cheaper pair below the feasibility threshold gives way to a dearer feasible one', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
-    const w = world(on, answers('opus', 0.2, { score: 2, confidence: 0.2 }))
+    const w = world(on, answers({ 'haiku::low': 0.59, 'opus::medium': 0.8 }))
     const seen = bottom(on)
 
     await turn($, w)
     await step($, 't1', 0)
 
-    expect(seen[0]).toEqual({ model: SONNET, effort: 'medium', agentId: undefined })
-    expect(steps(w)[0]?.reasons).toEqual(['model:low-confidence', 'effort:low-confidence'])
+    expect(seen[0]).toEqual({ model: OPUS, effort: 'medium', agentId: undefined })
   })
 
-  test('on: at the default threshold of 0.5 the highest probability is taken', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
+  test('on: the feasibility threshold comes from settings; with no pair feasible the most able runs', { options: { ...ON, feasibility_threshold: 0.95 } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
-    const w = world(on, answers('opus', 0.5, { score: 2, confidence: 0.5 }))
+    const w = world(on, answers({ 'haiku::low': 0.6, 'opus::high': 0.9 }))
     const seen = bottom(on)
 
     await turn($, w)
     await step($, 't1', 0)
 
     expect(seen[0]).toEqual({ model: OPUS, effort: 'high', agentId: undefined })
+    expect(steps(w)[0]?.reasons).toContain('model:none-feasible-most-capable')
   })
 
-  test('on: both thresholds come from settings', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on', model_threshold: 0.95, effort_threshold: 0.95 } }, async ($, on) => {
-    mock.clock(on)
-    mock.store(on, LEARNED)
-    const w = world(on, answers('opus', 0.9, { score: 2, confidence: 0.9 }))
-    const seen = bottom(on)
-
-    await turn($, w)
-    await step($, 't1', 0)
-
-    expect(seen[0]).toEqual({ model: SONNET, effort: 'medium', agentId: undefined })
-    expect(steps(w)[0]?.reasons).toEqual(['model:low-confidence', 'effort:low-confidence'])
-  })
-
-  test('on: effort is the most likely level, not the rounded score', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
-    mock.clock(on)
-    mock.store(on, LEARNED)
-    // score 0.9 would round to medium; the most likely level is low.
-    const w = world(on, answers('opus', 0.9, { score: 0.9, confidence: 0.6, probabilities: { '0': 0.5, '1': 0.1, '2': 0.4 } }))
-    const seen = bottom(on)
-
-    await turn($, w)
-    await step($, 't1', 0)
-
-    expect(seen[0]).toEqual({ model: OPUS, effort: 'low', agentId: undefined })
-  })
-
-  test('on: the highest probability among routable tiers is taken, whatever Jev\'s own pick', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
-    mock.clock(on)
-    mock.store(on, LEARNED)
-    const body = rankWide(0.9, 'speckit-specify', { choice: 'opus', confidence: 0.7 }, { score: 2, confidence: 0.9 }) as any
-    body.answers.model_tier.probabilities = { haiku: 0.7, sonnet: 0.2, opus: 0.1 }
-    const w = world(on, q => ('acts_on_user_system' in q ? { status: 200, body } : { status: 200, body: rerank(q, {}) }))
-    const seen = bottom(on)
-
-    await turn($, w)
-    await step($, 't1', 0)
-
-    expect(seen[0]?.model).toBe(HAIKU)
-  })
-
-  test('on: below the threshold a configured fallback model is used', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on', fallback_model: 'haiku' } }, async ($, on) => {
-    mock.clock(on)
-    mock.store(on, LEARNED)
-    const w = world(on, answers('opus', 0.2, { score: 2, confidence: 0.2 }))
-    const seen = bottom(on)
-
-    await turn($, w)
-    await step($, 't1', 0)
-
-    expect(seen[0]?.model).toBe(HAIKU)
-    expect(steps(w)[0]?.reasons).toContain('model:fallback-haiku (low-confidence)')
-  })
-
-  test('on: a Jev error uses the configured fallback model too', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on', fallback_model: 'opus' } }, async ($, on) => {
+  test('on: a Jev error uses the configured fallback model', { options: { ...ON, fallback_model: 'haiku' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
     const w = world(on, () => ({ status: 500, body: {} }))
@@ -201,67 +169,56 @@ describe('model routing', () => {
     await turn($, w)
     await step($, 't1', 0)
 
-    expect(seen[0]?.model).toBe(OPUS)
+    expect(seen[0]?.model).toBe(HAIKU)
+    expect(steps(w)[0]?.reasons).toContain('model:fallback-haiku (no-jev-answer)')
   })
 
-  test('the effort level descriptions Jev sees come from settings', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
+  test('the effort descriptions Jev sees come from settings', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, { ...LEARNED, advanced: { effort_low: 'my low', effort_high: 'my high' } })
-    const w = world(on, answers('opus', 0.9))
+    const w = world(on, answers())
     bottom(on)
 
     await turn($, w)
 
-    const levels = JSON.parse(w.fetches[0]?.body ?? '{}').questions.effort_level.criteria as string[]
-    expect(levels[0]).toBe('my low')
-    expect(levels[2]).toBe('my high')
+    const questions = JSON.parse(w.fetches[0]?.body ?? '{}').questions
+    expect(questions['feasible::opus::low'].instructions).toContain('my low')
+    expect(questions['feasible::opus::high'].instructions).toContain('my high')
     // An unset level keeps its default.
-    expect(levels[1]).toContain('Some context needed')
+    expect(questions['feasible::opus::medium'].instructions).toContain('Moderate reasoning')
   })
 
-  test('on: effort has its own lower threshold: 0.45 changes effort while a 0.2 model falls back', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
-    mock.clock(on)
-    mock.store(on, LEARNED)
-    const w = world(on, answers('opus', 0.2, { score: 1, confidence: 0.45, probabilities: { '0': 0.2, '1': 0.55, '2': 0.25 } }))
-    const seen = bottom(on)
-
-    await turn($, w)
-    await step($, 't1', 0)
-
-    expect(seen[0]).toEqual({ model: SONNET, effort: 'medium', agentId: undefined })
-    expect(steps(w)[0]?.reasons).toEqual(['model:low-confidence', 'effort:same'])
-  })
-
-  test('on: a family whose full id has not been learned is never sent', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
+  test('on: a tier whose full id has not been learned is neither asked nor sent', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, {})
-    const w = world(on, answers('opus', 0.9))
+    const w = world(on, answers({ 'opus::high': 0.9 }))
     const seen = bottom(on)
 
     await turn($, w)
     await step($, 't1', 0)
 
+    expect(Object.keys(JSON.parse(w.fetches[0]?.body ?? '{}').questions).some(k => k.startsWith('feasible::'))).toBe(false)
     expect(seen[0]?.model).toBe(SONNET)
-    expect(steps(w)[0]?.reasons).toContain('model:id-not-learned')
+    expect(steps(w)[0]?.reasons).toContain('model:none-routable')
   })
 
-  test('on: a target whose effort support is unknown is not switched to', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
+  test('on: a tier whose effort support is unknown is not asked about', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, { caps: { ...CAPS, families: { haiku: { id: HAIKU, ok: true, at: '' } } } })
-    const w = world(on, answers('haiku', 0.9))
+    const w = world(on, answers({ 'haiku::low': 0.9 }))
     const seen = bottom(on)
 
     await turn($, w)
     await step($, 't1', 0)
 
+    expect(JSON.parse(w.fetches[0]?.body ?? '{}').questions['feasible::haiku::low']).toBeUndefined()
     expect(seen[0]?.model).toBe(SONNET)
-    expect(steps(w)[0]?.reasons).toContain('model:effort-support-unknown')
   })
 
   test('on: a target known to take no effort is sent without one', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, { caps: { ...CAPS, families: { haiku: { id: HAIKU, ok: true, effort: false, at: '' } } } })
-    const w = world(on, answers('haiku', 0.9))
+    const w = world(on, answers({ 'haiku::low': 0.9 }))
     const seen = bottom(on)
 
     await turn($, w)
@@ -287,7 +244,7 @@ describe('model routing', () => {
   test('on: subagent steps keep their own model', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
-    const w = world(on, answers('opus', 0.9))
+    const w = world(on, answers({ 'opus::high': 0.9 }))
     const seen = bottom(on)
 
     await turn($, w)
@@ -299,7 +256,7 @@ describe('model routing', () => {
   test('on: a failed routed request is resent on the session model and the model is not tried again', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
-    const w = world(on, answers('opus', 0.9))
+    const w = world(on, answers({ 'opus::high': 0.9 }))
     const seen = bottom(on, [OPUS])
 
     await turn($, w)
@@ -312,16 +269,16 @@ describe('model routing', () => {
     expect(steps(w)[1]?.reasons).toContain('model:failed-this-session')
   })
 
-  test('off: Jev is not asked about models and nothing changes', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'off' } }, async ($, on) => {
+  test('off: Jev is not asked about models and nothing changes', { options: { ...ON, model_routing: 'off' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
-    const w = world(on, answers('opus', 0.9))
+    const w = world(on, answers({ 'opus::high': 0.9 }))
     const seen = bottom(on)
 
     await turn($, w)
     await step($, 't1', 0)
 
-    expect(JSON.parse(w.fetches[0]?.body ?? '{}').questions.model_tier).toBeUndefined()
+    expect(Object.keys(JSON.parse(w.fetches[0]?.body ?? '{}').questions).some(k => k.startsWith('feasible::'))).toBe(false)
     expect(seen[0]?.model).toBe(SONNET)
   })
 })
@@ -330,7 +287,7 @@ describe('learning and probe', () => {
   test('a main step teaches the current family without any probe', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, {})
-    const w = world(on, answers('opus', 0.9))
+    const w = world(on, answers({ 'opus::high': 0.9 }))
     bottom(on)
 
     await turn($, w)
@@ -343,7 +300,7 @@ describe('learning and probe', () => {
   test('probe resolves each alias through a subagent, learns from its step, and arms the resend check', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
     const clock = mock.clock(on)
     mock.store(on, {})
-    const w = world(on, answers('opus', 0.9))
+    const w = world(on, answers({ 'opus::high': 0.9 }))
     const seen = bottom(on, [BAD])
     const ids: Record<string, string> = { haiku: HAIKU, sonnet: SONNET, opus: OPUS }
     // The engine resolves the alias and starts the subagent; its step follows.
@@ -366,12 +323,14 @@ describe('learning and probe', () => {
     }
     await clock.settle()
 
-    // The resend check rides the person's next message.
+    // The resend check rides the person's next message; nothing is left to
+    // probe automatically.
     await $.prompt.submit({ text: 'ok', asUser: true })
     await $.turn.start({ text: 'ok', turnId: 'p1' })
     await step($, 'p1', 0)
 
     expect(seen.slice(-2).map(s => s.model)).toEqual([BAD, SONNET])
+    expect(spawned.length).toBe(3)
     expect(w.fetches.length).toBe(0)
 
     const status = await $.command.run({ command: 'jev-model', args: '' })
@@ -381,11 +340,72 @@ describe('learning and probe', () => {
   })
 })
 
+describe('automatic probe', () => {
+  const spawns = (on: On) => {
+    const aliases: string[] = []
+    on('agent.spawn', async (_, e) => {
+      aliases.push(String(e.model))
+      return { model: e.model === 'haiku' ? HAIKU : e.model === 'sonnet' ? SONNET : OPUS } as never
+    })
+    return aliases
+  }
+
+  test('first use: a turn start probes each family not known yet, once per load', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, LEARNED)
+    const w = world(on, answers())
+    bottom(on)
+    const aliases = spawns(on)
+
+    await turn($, w)
+    // opus and haiku are learned; sonnet is not.
+    expect(aliases).toEqual(['sonnet'])
+    expect(logLines(w).find(l => l.type === 'probe' && l.kind === 'auto')?.families).toEqual(['sonnet'])
+    await $.prompt.submit({ text: 'again', asUser: true })
+    await $.turn.start({ text: 'again', turnId: 't2' })
+    expect(aliases).toEqual(['sonnet'])
+  })
+
+  test('no automatic probe with model routing off', { options: { typesafe_api_key: FAKE_KEY, model_routing: 'off' } }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, {})
+    const w = world(on, answers())
+    bottom(on)
+    const aliases = spawns(on)
+    await turn($, w)
+    expect(aliases).toEqual([])
+  })
+
+  test('auto_probe off is kept in $.store', { options: { typesafe_api_key: FAKE_KEY } }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, { advanced: { auto_probe: false } })
+    const w = world(on, answers())
+    bottom(on)
+    const aliases = spawns(on)
+    await turn($, w)
+    expect(aliases).toEqual([])
+  })
+
+  test('a routed request that fails probes that family again', { options: ON }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, { caps: { ...CAPS, families: { ...CAPS.families, sonnet: { id: SONNET, ok: true, effort: true, at: '' } } } })
+    const w = world(on, answers({ 'opus::high': 0.9 }))
+    bottom(on, [OPUS])
+    const aliases = spawns(on)
+
+    await turn($, w)
+    expect(aliases).toEqual([])
+    await step($, 't1', 0)
+    expect(aliases).toEqual(['opus'])
+    expect(logLines(w).find(l => l.type === 'probe' && l.kind === 'auto')?.why).toBe('a routed request to opus failed')
+  })
+})
+
 describe('settings kept off the page', () => {
   test('set applies at once, unset restores the default, bad values change nothing', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, {})
-    const w = world(on, answers('opus', 0.9))
+    const w = world(on, answers({ 'opus::high': 0.9 }))
     const requestChars = () => (JSON.parse(w.fetches.at(-1)?.body ?? '{}').state.request as string).length
 
     expect((await $.command.run({ command: 'jev-model', args: 'set max_prompt_chars 300' })).text).toContain('max_prompt_chars = 300')
@@ -403,14 +423,13 @@ describe('settings kept off the page', () => {
 
   test('an effort description keeps its case and spaces, and settings lists the change', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
     mock.clock(on)
-    mock.store(on, {})
-    const w = world(on, answers('opus', 0.9))
+    mock.store(on, LEARNED)
+    const w = world(on, answers({ 'opus::high': 0.9 }))
 
     await $.command.run({ command: 'jev-model', args: 'set effort_high Weigh Several Approaches carefully' })
     await $.prompt.submit({ text: PROMPT, asUser: true })
 
-    const levels = JSON.parse(w.fetches[0]?.body ?? '{}').questions.effort_level.criteria as string[]
-    expect(levels[2]).toBe('Weigh Several Approaches carefully')
+    expect(JSON.parse(w.fetches[0]?.body ?? '{}').questions['feasible::opus::high'].instructions).toContain('Weigh Several Approaches carefully')
     const list = (await $.command.run({ command: 'jev-model', args: 'settings' })).text
     expect(list).toContain('effort_high = Weigh Several Approaches carefully  [changed')
     expect(list).toContain('timeout_ms = 8000  [default]')
@@ -419,7 +438,7 @@ describe('settings kept off the page', () => {
   test('an unknown name is refused with the list', { options: { typesafe_api_key: FAKE_KEY } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, {})
-    world(on, answers('opus', 0.9))
+    world(on, answers({ 'opus::high': 0.9 }))
     const out = await $.command.run({ command: 'jev-model', args: 'set nope 1' })
     expect(out.text).toContain('unknown setting "nope"')
     expect(out.text).toContain('timeout_ms')
@@ -429,7 +448,7 @@ describe('settings kept off the page', () => {
 describe('reset to defaults', () => {
   test('/jev-model defaults restores changed settings, keeps the API key and switches the flag off', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
     mock.clock(on)
-    const w = world(on, answers('opus', 0.9))
+    const w = world(on, answers({ 'opus::high': 0.9 }))
 
     const out = await $.command.run({ command: 'jev-model', args: 'defaults' })
 
@@ -453,9 +472,29 @@ describe('model policy', () => {
     expect(availableFrom([]).models).toEqual({})
   })
 
-  test('effort outside low, medium and high is never produced', () => {
-    const d = decide('r', undefined, { score: 9, confidence: 1 }, { models: {}, source: '', raw: [] }, { model: 0.5, effort: 0.4 })
-    expect(d.effort).toBe('high')
+  const costs = (table: Record<string, number | undefined>) => (family: string, effort: string) => ({ usd: table[`${family}::${effort}`] })
+
+  test('the cheapest pair at or above the threshold is taken, not the most feasible', () => {
+    const d = decide('r', { haiku: { high: 0.8 }, sonnet: { low: 0.9 }, opus: { low: 0.4 } }, ['haiku', 'sonnet', 'opus'], costs({ 'haiku::high': 0.5, 'sonnet::low': 0.3, 'opus::low': 0.2 }), 0.6)
+    expect([d.family, d.effort, d.how, d.usd]).toEqual(['sonnet', 'low', 'cheapest-feasible', 0.3])
+    expect(d.candidates?.map(c => `${c.family}/${c.effort}`)).toEqual(['opus/low', 'sonnet/low', 'haiku/high'])
+  })
+
+  test('a known cost sorts before an unknown one; unknown ones by list price, then tier and effort', () => {
+    const d = decide('r', { haiku: { low: 0.9, high: 0.9 }, opus: { low: 0.9 } }, ['haiku', 'opus'], (family, effort) => (family === 'opus' ? { usd: 9 } : { rank: effort === 'high' ? 1 : 2 }), 0.6)
+    expect(d.candidates?.map(c => `${c.family}/${c.effort}`)).toEqual(['opus/low', 'haiku/high', 'haiku/low'])
+    const tie = decide('r', { haiku: { medium: 0.9, low: 0.9 }, sonnet: { low: 0.9 } }, ['haiku', 'sonnet'], () => ({}), 0.6)
+    expect([tie.family, tie.effort]).toEqual(['haiku', 'low'])
+  })
+
+  test('with no pair feasible, the most able runs, the cheaper of equals', () => {
+    const d = decide('r', { haiku: { low: 0.3 }, sonnet: { high: 0.5 }, opus: { high: 0.5 } }, ['haiku', 'sonnet', 'opus'], costs({ 'haiku::low': 0.1, 'sonnet::high': 0.4, 'opus::high': 0.2 }), 0.6)
+    expect([d.family, d.effort, d.how]).toEqual(['opus', 'high', 'none-feasible-most-capable'])
+  })
+
+  test('only routable tiers are candidates; none answered is no-jev-answer', () => {
+    expect(decide('r', { opus: { high: 0.9 } }, ['haiku'], () => ({}), 0.6).modelReason).toBe('none-routable')
+    expect(decide('r', undefined, ['haiku'], () => ({}), 0.6).modelReason).toBe('no-jev-answer')
   })
 
   test('the same family keeps the step\'s own model string', () => {
@@ -476,7 +515,7 @@ describe('turn note', () => {
   test('a switched turn says which model answered and what Jev chose', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
-    const w = world(on, answers('haiku', 1, { score: 0.06, confidence: 0.91 }))
+    const w = world(on, answers({ 'haiku::low': 0.9 }))
     bottom(on)
     complete(on)
 
@@ -484,14 +523,14 @@ describe('turn note', () => {
     await step($, 't1', 0)
     const done = await $.turn.complete({ answer: 'hi', durationMs: 1, reason: 'answer', isAborted: false, turnId: 't1', usage: { model: HAIKU, input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } as never)
 
-    // The note alone: the answer itself is never repeated beneath it.
-    expect(done.text).toBe(`jev-router: answered by ${HAIKU} · effort low · Jev chose haiku/low`)
+    // One line naming who answered; the answer and cache detail are not repeated.
+    expect(done.text).toBe(`jev-router: answered by ${HAIKU} · requested effort low · cheapest feasible haiku/low, cost unknown`)
   })
 
   test('a fallback turn names the fallback', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on', fallback_model: 'haiku' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
-    const w = world(on, answers('opus', 0.2, { score: 2, confidence: 0.2 }))
+    const w = world(on, () => ({ status: 500, body: {} }))
     bottom(on)
     complete(on)
 
@@ -500,13 +539,13 @@ describe('turn note', () => {
     const done = await $.turn.complete({ answer: 'hi', durationMs: 1, reason: 'answer', isAborted: false, turnId: 't1', usage: { model: HAIKU, input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } as never)
 
     expect(done.text).toContain(`answered by ${HAIKU}`)
-    expect(done.text).toContain('fallback haiku (low-confidence)')
+    expect(done.text).toContain('fallback haiku (no-jev-answer)')
   })
 
   test('a dry-run turn says nothing was switched', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
-    const w = world(on, answers('haiku', 1, { score: 0.06, confidence: 0.91 }))
+    const w = world(on, answers({ 'haiku::low': 0.9 }))
     bottom(on)
     complete(on)
 
@@ -515,6 +554,6 @@ describe('turn note', () => {
     const done = await $.turn.complete({ answer: 'hi', durationMs: 1, reason: 'answer', isAborted: false, turnId: 't1', usage: { model: SONNET, input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } as never)
 
     expect(done.text).toContain('dry-run, nothing was switched')
-    expect(done.text).toContain('Jev chose haiku/low')
+    expect(done.text).toContain('cheapest feasible haiku/low')
   })
 })

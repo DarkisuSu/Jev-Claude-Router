@@ -50,58 +50,71 @@ export const availableFrom = (rows: readonly RowLike[]): Available => {
   return { models, source: `config:${row.key}`, raw }
 }
 
-export type ModelAnswer = { choice: string; confidence: number; probabilities: Record<string, number> }
-export type EffortAnswer = { score: number; confidence: number; probabilities?: Record<string, number> }
+// Jev's judgment, per tier and effort, that the pair can complete the work.
+export type Feasible = Partial<Record<Family, Partial<Record<Effort, number>>>>
+
+// One tier at one effort: Jev's feasibility and the router's cost for it.
+// `usd` is the estimated API-equivalent cost over the horizon (unknown when
+// no price or context is known); `rank` orders unknown costs by list price.
+export type Candidate = { family: Family; effort: Effort; feasible: number; usd?: number; rank?: number }
 
 export type Decision = {
   round: string
   family?: Family
-  modelConfidence?: number
   effort?: Effort
-  effortConfidence?: number
-  // Why no family or effort was taken from Jev.
+  // Why no tier was taken from Jev: 'no-jev-answer' or 'none-routable'.
   modelReason?: string
   effortReason?: string
+  feasible?: Feasible
+  feasibleThreshold?: number
+  // 'cheapest-feasible', or 'none-feasible-most-capable' when no pair clears
+  // the threshold.
+  how?: string
+  usd?: number
+  // Every pair costed, cheapest first.
+  candidates?: Candidate[]
 }
 
-// The question's confidence is the gate; past it, the highest probability
-// decides: the most likely tier, the most likely effort level.
+// Cheaper first: a known cost before an unknown one, then the list price,
+// then the lower tier and the lower effort.
+const cheaper = (a: Candidate, b: Candidate) => {
+  if (a.usd !== undefined && b.usd !== undefined && a.usd !== b.usd) return a.usd - b.usd
+  if ((a.usd === undefined) !== (b.usd === undefined)) return a.usd === undefined ? 1 : -1
+  if (a.rank !== undefined && b.rank !== undefined && a.rank !== b.rank) return a.rank - b.rank
+  if ((a.rank === undefined) !== (b.rank === undefined)) return a.rank === undefined ? 1 : -1
+  return FAMILIES.indexOf(a.family) - FAMILIES.indexOf(b.family) || EFFORTS.indexOf(a.effort) - EFFORTS.indexOf(b.effort)
+}
+
+// Jev judges whether each tier at each effort can do the work; the router
+// costs each pair and takes the cheapest Jev judges feasible. With none
+// feasible, the pair Jev judges most able (the cheaper of equals).
 export const decide = (
   round: string,
-  model: ModelAnswer | undefined,
-  effort: EffortAnswer | undefined,
-  available: Available,
-  threshold: { model: number; effort: number },
+  feasible: Feasible | undefined,
+  routable: readonly Family[],
+  cost: (family: Family, effort: Effort) => { usd?: number; rank?: number },
+  threshold: number,
 ): Decision => {
-  const d: Decision = { round }
-  if (!model) d.modelReason = 'no-jev-answer'
-  else {
-    d.modelConfidence = model.confidence
-    const ranked = Object.entries(model.probabilities)
-      .filter(([name]) => {
-        const f = familyOf(name)
-        return f !== undefined && available.models[f] !== undefined
-      })
-      .sort((a, b) => b[1] - a[1])
-    const top = familyOf(ranked[0]?.[0])
-    if (!top) d.modelReason = 'not-available'
-    else if (model.confidence < threshold.model) d.modelReason = 'low-confidence'
-    else d.family = top
-  }
-  if (!effort) d.effortReason = 'no-jev-answer'
-  else {
-    d.effortConfidence = effort.confidence
-    if (effort.confidence < threshold.effort) d.effortReason = 'low-confidence'
-    else {
-      const levels = Object.entries(effort.probabilities ?? {})
-        .map(([k, p]) => [Number(k), p] as const)
-        .filter(([k]) => Number.isInteger(k) && k >= 0 && k < EFFORTS.length)
-        .sort((a, b) => b[1] - a[1])
-      // The most likely level; the rounded score only where no level was given.
-      const index = levels[0]?.[0] ?? Math.round(effort.score)
-      d.effort = EFFORTS[Math.max(0, Math.min(EFFORTS.length - 1, index))]
+  const d: Decision = { round, feasible, feasibleThreshold: threshold }
+  const candidates: Candidate[] = []
+  for (const family of routable) {
+    for (const effort of EFFORTS) {
+      const p = feasible?.[family]?.[effort]
+      if (p !== undefined) candidates.push({ family, effort, feasible: p, ...cost(family, effort) })
     }
   }
+  if (candidates.length === 0) {
+    d.modelReason = d.effortReason = feasible && Object.keys(feasible).length > 0 ? 'none-routable' : 'no-jev-answer'
+    return d
+  }
+  const sorted = [...candidates].sort(cheaper)
+  const able = sorted.filter(c => c.feasible >= threshold)
+  const pick = able[0] ?? [...sorted].sort((a, b) => b.feasible - a.feasible)[0]!
+  d.how = able.length > 0 ? 'cheapest-feasible' : 'none-feasible-most-capable'
+  d.family = pick.family
+  d.effort = pick.effort
+  d.usd = pick.usd
+  d.candidates = sorted
   return d
 }
 
@@ -115,6 +128,9 @@ export type FamilyCaps = {
   ok?: boolean
   // Whether a step on that id carried effort (the model takes effort).
   effort?: boolean
+  // The largest context (input + cache read + cache write tokens) a response
+  // on that id came back over: evidence of what it can hold, never a limit.
+  maxContext?: number
   source?: string
   at: string
 }
@@ -133,7 +149,7 @@ export type Plan = {
   wouldEffort?: string
 }
 
-const isEffort = (v: unknown): v is Effort => typeof v === 'string' && (EFFORTS as readonly string[]).includes(v)
+export const isEffort = (v: unknown): v is Effort => typeof v === 'string' && (EFFORTS as readonly string[]).includes(v)
 
 // Learns from one step the engine resolved: the family's full id and whether
 // it takes effort. A bare alias is never recorded as an id.
@@ -151,11 +167,22 @@ export const learn = (
     id: step.model,
     ok: answered || (before?.id === step.model && before.ok === true),
     effort: answered ? step.effort !== undefined : before?.id === step.model ? before.effort : undefined,
+    ...(before?.id === step.model && before.maxContext !== undefined ? { maxContext: before.maxContext } : {}),
     source,
     at,
   }
   if (before && before.id === next.id && before.ok === next.ok && before.effort === next.effort) return undefined
   return { ...caps, families: { ...caps.families, [family]: next } }
+}
+
+// Raises the largest context a model id has answered over. Returns undefined
+// when nothing grew, so the store is written only on news.
+export const noteContext = (caps: Caps, model: string, tokens: number | undefined): Caps | undefined => {
+  const family = familyOf(model)
+  if (!family || tokens === undefined || !Number.isFinite(tokens) || tokens <= 0) return undefined
+  const before = caps.families[family]
+  if (!before || before.id !== model || (before.maxContext ?? 0) >= tokens) return undefined
+  return { ...caps, families: { ...caps.families, [family]: { ...before, maxContext: tokens } } }
 }
 
 export const planStep = (
@@ -176,14 +203,14 @@ export const planStep = (
   let model = step.model
   let target: FamilyCaps | undefined
 
-  // No confident Jev choice: the fallback model stands in, 'session' being
-  // the model the person chose.
-  const unconfident = decision.modelReason === 'low-confidence' || decision.modelReason === 'no-jev-answer'
-  const useFallback = !decision.family && unconfident && fallback !== 'session'
+  // No Jev answer: the fallback model stands in, 'session' being the model
+  // the person chose.
+  const useFallback = !decision.family && fallback !== 'session'
   const wanted = decision.family ?? (useFallback ? (fallback as Family) : undefined)
 
   if (!wanted) reasons.push(`model:${decision.modelReason ?? 'none'}`)
   else if (useFallback) reasons.push(`model:fallback-${wanted} (${decision.modelReason})`)
+  else if (decision.how === 'none-feasible-most-capable') reasons.push(`model:${decision.how}`)
   if (!wanted) {
     // nothing to switch to
   } else if (wanted === current) reasons.push('model:same-family')

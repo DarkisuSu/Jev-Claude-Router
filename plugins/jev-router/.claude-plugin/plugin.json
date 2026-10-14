@@ -61,7 +61,7 @@
     "model_routing": {
       "type": "string",
       "title": "Model · Model routing",
-      "description": "off: never change the model. dry-run: log what Jev would send, change nothing. on: send each main request with Jev's choice when it is confident.\nDefault: dry-run",
+      "description": "off: never change the model. dry-run: log what Jev would send, change nothing. on: send each main request with the cheapest model and effort Jev judges able to do the work.\nDefault: dry-run",
       "options": [
         "off",
         "dry-run",
@@ -69,18 +69,10 @@
       ],
       "default": "dry-run"
     },
-    "model_threshold": {
-      "type": "number",
-      "title": "Model · Model confidence threshold",
-      "description": "Jev's model choice is used only when its confidence reaches this. TypeSafe Confidence guide example floor.\nDefault: 0.5",
-      "min": 0,
-      "max": 1,
-      "default": 0.5
-    },
     "fallback_model": {
       "type": "string",
       "title": "Model · Fallback model",
-      "description": "Used when Jev is not confident or fails. session: the model you chose with /model. The chat panel's model display never changes.\nDefault: session",
+      "description": "Used when Jev gives no answer (an error or a timeout). session: the model you chose with /model. The chat panel's model display never changes.\nDefault: session",
       "options": [
         "session",
         "haiku",
@@ -89,13 +81,19 @@
       ],
       "default": "session"
     },
-    "effort_threshold": {
+    "feasibility_threshold": {
       "type": "number",
-      "title": "Effort · Effort confidence threshold",
-      "description": "Jev's effort choice is used only when its confidence reaches this. Lower than the model threshold because effort confidence runs lower.\nDefault: 0.4",
+      "title": "Model · Feasibility threshold",
+      "description": "Jev judges each tier at each effort; a pair counts as able to do the work when Jev judges it at least this likely to complete it. The cheapest able pair runs (cache rebuild and output included).\nDefault: 0.6",
       "min": 0,
       "max": 1,
-      "default": 0.4
+      "default": 0.6
+    },
+    "jev_context_enabled": {
+      "type": "boolean",
+      "title": "Routing · Share recent context with Jev",
+      "description": "Send bounded recent user/assistant excerpts to api.typesafe.ai with the existing classification call. Tool payloads and skill blocks are excluded; common credentials are redacted on a best-effort basis. Excerpts are never logged. Disable to send only the current prompt text.\nDefault: true",
+      "default": true
     }
   }
 }

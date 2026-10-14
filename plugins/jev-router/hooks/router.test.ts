@@ -160,12 +160,38 @@ describe('route', () => {
     const bodies: string[] = []
     const send = async (body: string) => {
       bodies.push(body)
-      return { status: 200, text: JSON.stringify(rankWide(0.9, 'x', { choice: 'haiku', confidence: 0.8 }, { score: 0.2, confidence: 0.9 })) }
+      return { status: 200, text: JSON.stringify(rankWide(0.9, 'x', { 'haiku::low': 0.8 }, JSON.parse(body).questions)) }
     }
     const result = await route(PROMPT, [], { ...cfg, modelFamilies: ['haiku', 'sonnet', 'opus'] }, send, now)
     expect(bodies.length).toBe(1)
-    expect(Object.keys(JSON.parse(bodies[0] ?? '{}').questions)).toEqual(['model_tier', 'effort_level'])
-    expect(result.modelAnswer?.choice).toBe('haiku')
-    expect(result.effortAnswer?.score).toBe(0.2)
+    const questions = JSON.parse(bodies[0] ?? '{}').questions
+    expect(Object.keys(questions)).toEqual(['haiku', 'sonnet', 'opus'].flatMap(f => ['low', 'medium', 'high'].map(e => `feasible::${f}::${e}`)))
+    expect(questions['feasible::sonnet::high'].instructions).toContain('sonnet tier at high effort')
+    expect(questions['feasible::sonnet::high'].instructions).toContain('not cost')
+    expect(result.feasible?.haiku).toEqual({ low: 0.8, medium: 0.1, high: 0.1 })
+  })
+  test('one routable tier still gets its three efforts asked', async () => {
+    const bodies: string[] = []
+    const send = async (body: string) => {
+      bodies.push(body)
+      return { status: 200, text: JSON.stringify(rankWide(0.9, 'x', {}, JSON.parse(body).questions)) }
+    }
+    await route(PROMPT, [], { ...cfg, modelFamilies: ['opus'] }, send, now)
+    expect(Object.keys(JSON.parse(bodies[0] ?? '{}').questions)).toEqual(['feasible::opus::low', 'feasible::opus::medium', 'feasible::opus::high'])
+  })
+  test('a malformed model answer does not prevent valid two-stage Skill Selection', async () => {
+    let calls = 0
+    const send = async (body: string) => {
+      calls++
+      const q = JSON.parse(body).questions
+      const response: any = calls === 1 ? rankWide(0.9, 'speckit-specify') : rerank(q, { 'speckit-specify': 0.9 })
+      if (calls === 1) response.answers['feasible::opus::high'] = { type: 'noul', noul: 7 }
+      return { status: 200, text: JSON.stringify(response) }
+    }
+    const result = await route(PROMPT, skills, { ...cfg, modelFamilies: ['haiku', 'sonnet', 'opus'] }, send, now)
+    expect(calls).toBe(2)
+    expect(result.outcome).toBe('selected')
+    expect(result.selected[0]?.name).toBe('speckit-specify')
+    expect(result.feasible).toBeUndefined()
   })
 })

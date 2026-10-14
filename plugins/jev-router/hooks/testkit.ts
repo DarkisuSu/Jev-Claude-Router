@@ -2,6 +2,8 @@
 // Jev over http.fetch) answered from memory. No network, no real key.
 import { mock } from 'claude-code/testing'
 import type { On } from 'claude-code'
+import { SHARED } from './settings'
+import type { MessageLike } from './awareness'
 
 export const FAKE_KEY = 'placeholder-not-a-real-key'
 const HOME = 'C:/fakehome'
@@ -40,35 +42,42 @@ const MANIFEST = JSON.stringify({
     fits_threshold: { type: 'number', default: 0.3 },
     fallback_model: { type: 'string', default: 'session' },
     reset_to_defaults: { type: 'boolean', default: false },
+    ...Object.fromEntries(Object.entries(SHARED).filter(([, spec]) => spec.where === 'page').map(([key, spec]) => [key, { default: spec.default }])),
   },
 })
 
 type Jev = (questions: Record<string, unknown>) => { status: number; body: unknown } | 'hang'
 
+// Jev's request-1 answer. `feasible` maps 'family::effort' to Jev's
+// feasibility; with `questions`, every pair asked and not listed is
+// answered `rest` (0.1: judged unable), as Jev answers every question.
 export const rankWide = (
   gate: number,
   top: string,
-  model?: { choice: string; confidence: number },
-  effort?: { score: number; confidence: number; probabilities?: Record<string, number> },
-) => ({
-  model: 'jev-test-1',
-  answers: {
-    which: {
-      type: 'choice',
-      choice: top,
-      probabilities: { [top]: 0.7, 'speckit-plan': 0.2, 'typesafe:typesafe-ai': 0.1 },
-      confidence: 0.6,
+  feasible: Record<string, number> = {},
+  questions?: Record<string, unknown>,
+  rest = 0.1,
+) => {
+  const pairs: Record<string, number> = {}
+  for (const id of Object.keys(questions ?? {})) if (id.startsWith('feasible::')) pairs[id.slice('feasible::'.length)] = rest
+  Object.assign(pairs, feasible)
+  return {
+    model: 'jev-test-1',
+    answers: {
+      which: {
+        type: 'choice',
+        choice: top,
+        probabilities: { [top]: 0.7, 'speckit-plan': 0.2, 'typesafe:typesafe-ai': 0.1 },
+        confidence: 0.6,
+      },
+      acts_on_user_system: { type: 'noul', noul: gate },
+      would_follow_documented_procedure: { type: 'noul', noul: gate },
+      prose_suffices: { type: 'noul', noul: 1 - gate },
+      ...Object.fromEntries(Object.entries(pairs).map(([pair, noul]) => [`feasible::${pair}`, { type: 'noul', noul }])),
     },
-    acts_on_user_system: { type: 'noul', noul: gate },
-    would_follow_documented_procedure: { type: 'noul', noul: gate },
-    prose_suffices: { type: 'noul', noul: 1 - gate },
-    ...(model
-      ? { model_tier: { type: 'choice', choice: model.choice, probabilities: { [model.choice]: model.confidence }, confidence: model.confidence } }
-      : {}),
-    ...(effort ? { effort_level: { type: 'score', score: effort.score, legend: {}, probabilities: effort.probabilities ?? {}, confidence: effort.confidence } } : {}),
-  },
-  usage: { input_tokens: 400, output_tokens: 10 },
-})
+    usage: { input_tokens: 400, output_tokens: 10 },
+  }
+}
 
 export const rerank = (questions: Record<string, unknown>, fitsByName: Record<string, number>) => {
   const answers: Record<string, unknown> = {}
@@ -81,27 +90,60 @@ export const rerank = (questions: Record<string, unknown>, fitsByName: Record<st
   return { model: 'jev-test-1', answers, usage: { input_tokens: 900, output_tokens: 8 } }
 }
 
+// $.store answered from a plain object the test can read back.
+export const memoryStore = (on: On, initial: Record<string, unknown> = {}) => {
+  const saved: Record<string, unknown> = { ...initial }
+  on('store.get', ($, e) => ({ value: saved[e.key] as never }))
+  on('store.set', ($, e) => {
+    saved[e.key] = e.value
+    return { value: undefined }
+  })
+  on('store.delete', ($, e) => {
+    delete saved[e.key]
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: Object.keys(saved) }))
+  return saved
+}
+
 export type World = {
   sets: { key: string; value: unknown }[]
   fetches: { url: string; auth?: string; body: string }[]
   written: Map<string, string>
   seen?: { text: string; context?: readonly string[] }
+  sessionId: string
+  contextTokens?: number
+  // The session model's context window and name, as Claude Code reports them.
+  window?: number
+  sessionModel?: string
+  configRows: ReturnType<typeof row>[]
+  status: string[]
+  messages: MessageLike[]
+  messageReads: number
 }
 
-export const world = (on: On, jev: Jev, extra?: { version?: string }): World => {
-  const w: World = { fetches: [], written: new Map(), sets: [] }
+export const world = (on: On, jev: Jev, extra?: { version?: string; gui?: Record<string, unknown> }): World => {
+  const configRows = [...PLUGIN_ROWS.map(r => ({ ...r })), ...Object.entries(SHARED).filter(([, spec]) => spec.where === 'page').map(([key, spec]) => row(key, extra?.gui?.[key] ?? spec.default, spec.kind))]
+  const w: World = { fetches: [], written: new Map(), sets: [], sessionId: 'test-session', configRows, status: [], messages: [], messageReads: 0 }
   mock.env(on, { USERPROFILE: HOME })
   on('command.list', () => ({ value: COMMANDS }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('config.list', () => ({ value: [MODEL_ROW, ...PLUGIN_ROWS] as never }))
+  on('ui.status', ($, e) => { w.status.push(e.text); return { value: undefined } })
+  on('ui.toast', () => ({ value: undefined }))
+  on('config.list', () => ({ value: [MODEL_ROW, ...w.configRows] as never }))
   on('config.set', ($, e) => {
     w.sets.push({ key: e.key, value: e.value })
+    const target = w.configRows.find(r => r.key === e.key)
+    if (target) target.value = e.value
     return { value: e.value } as never
   })
   on('session.version', () => ({ value: { version: extra?.version ?? '9.9.9' } as never }))
   on('session.cwd', () => ({ value: 'C:/fakeproject' }))
+  on('session.id', () => ({ value: w.sessionId }))
+  on('session.messages', () => { w.messageReads++; return { value: w.messages as never } })
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
-  on('session.usage', () => ({ value: { startedAt: 0, context: {}, rateLimits: [{ kind: 'five_hour', percentUsed: 1 }] } as never }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: w.contextTokens, window: w.window }, rateLimits: [{ kind: 'five_hour', percentUsed: 1 }] } as never }))
+  on('session.model', () => ({ value: w.sessionModel ?? 'opus' }))
   on('fs.list', ($, e) => ({ deny: `no folder ${e.path}` }))
   on('fs.exists', ($, e) => ({ value: w.written.has(e.path) }))
   on('fs.read', ($, e) => {
