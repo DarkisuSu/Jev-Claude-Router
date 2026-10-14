@@ -4,19 +4,7 @@ A plugin marketplace with one plugin, **jev-router**. On each new prompt it asks
 
 ## Install
 
-Requires Claude Code 2.1.287 or later and a TypeSafe API key.
-
-At a Claude Code prompt, run this and answer `y` when it asks to add the marketplace:
-
-```
-/plugin install jev-router --marketplace DarkisuSu/Jev-Claude-Router
-```
-
-Then enter the API key in the plugin's settings. Model routing starts in `dry-run`, which changes nothing.
-
-## Install with another Claude
-
-If you use Claude Code and want it to install this plugin for you, paste this prompt into a session:
+Paste this prompt into a Claude Code session to install the plugin:
 
 ```
 Install the "jev-router" Claude Code plugin from GitHub, then stop and tell me what happened.
