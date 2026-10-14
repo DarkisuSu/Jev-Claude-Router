@@ -84,7 +84,7 @@ describe('context capacity facts for Jev', () => {
 
 const H55 = 'claude-haiku-5-5', S55 = 'claude-sonnet-5-5', O55 = 'claude-opus-5-5'
 const caps55: Caps = { version: '9.9.9', families: { haiku: { id: H55, ok: true, effort: true, at: '' }, sonnet: { id: S55, ok: true, effort: true, at: '' }, opus: { id: O55, ok: true, effort: true, at: '' } }, retryOk: true }
-const cost5 = { horizon: 5, ratios: { low: 1, medium: 2, high: 4 } }
+const cost5 = { horizon: 5, ratios: { low: 1, medium: 2, high: 4, xhigh: 8, max: 16 } }
 // 865k tokens of conversation, first seen after a reload: cache state unknown.
 const reloaded = (subscription = false) => cacheEvidence(withContext({}, 865000), 0, { ...config.cache, subscription })
 const onOpusHigh = { model: O55, effort: 'high' }
@@ -122,7 +122,8 @@ describe('pair costs', () => {
   test('output per effort is learned as a moving average, and an unseen level is scaled from the nearest', () => {
     const once = learnOutput({}, 'high', 1000)!
     expect(learnOutput(once, 'high', 2000)).toEqual({ high: { avg: 1300, n: 2 } })
-    expect(learnOutput(once, 'xhigh', 2000)).toBeUndefined()
+    expect(learnOutput(once, 'turbo', 2000)).toBeUndefined()
+    expect(learnOutput(once, 'max', 2000)).toEqual({ high: { avg: 1000, n: 1 }, max: { avg: 2000, n: 1 } })
     expect(outputEstimate({ low: { avg: 300, n: 1 }, high: { avg: 2000, n: 1 } }, 'medium', cost5.ratios)).toBe(600)
     expect(outputEstimate({}, 'medium', cost5.ratios)).toBeUndefined()
   })
@@ -255,7 +256,7 @@ describe('awareness engine integration', () => {
     await begin($, 'a'); await step($, 'a')
     expect(sent).toEqual([{ model: SONNET, effort: 'medium' }])
     expect(last(w)?.final_recommended.model).toBe(OPUS)
-    expect(last(w)?.jev_feasible.opus).toEqual({ low: 0.1, medium: 0.1, high: 0.9 })
+    expect(last(w)?.jev_feasible.opus).toEqual({ low: 0.1, medium: 0.1, high: 0.9, xhigh: 0.1, max: 0.1 })
   })
   test('settings kept off the page persist in $.store and defaults restores them', { options }, async ($, on) => {
     mock.clock(on); const saved = memoryStore(on, { caps })
@@ -282,7 +283,7 @@ describe('Jev response schema', () => {
       return { status: res.status, text: JSON.stringify(res.body) }
     }, async () => 0)
     expect(bodies.length).toBe(2)
-    expect(result.feasible?.sonnet).toEqual({ low: 0.1, medium: 0.9, high: 0.1 })
+    expect(result.feasible?.sonnet).toEqual({ low: 0.1, medium: 0.9, high: 0.1, xhigh: 0.1, max: 0.1 })
     expect(bodies[1].state.recent_context).toBe(bodies[0].state.recent_context)
     expect(Object.keys(bodies[1].questions).some(k => k.startsWith('feasible::'))).toBe(false)
   })
@@ -299,6 +300,6 @@ describe('Jev response schema', () => {
     expect(result.feasible).toBeUndefined()
     expect(result.outcome).toBe('selected')
     expect(calls).toBe(2)
-    expect(Object.keys(rankWideBody('Fix it.', [], cfg).questions)).toEqual(['haiku', 'sonnet'].flatMap(f => ['low', 'medium', 'high'].map(e => `feasible::${f}::${e}`)))
+    expect(Object.keys(rankWideBody('Fix it.', [], cfg).questions)).toEqual(['haiku', 'sonnet'].flatMap(f => ['low', 'medium', 'high', 'xhigh', 'max'].map(e => `feasible::${f}::${e}`)))
   })
 })

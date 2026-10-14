@@ -31,7 +31,7 @@ Jev judges one thing per question: whether a tier at an effort can do the work. 
 
 | Question | Type | Judges |
 |---|---|---|
-| `feasible::<tier>::<effort>` | Noul, one per routable tier and effort (up to 9) | Whether that tier at that effort can reliably complete the request, apart from cost |
+| `feasible::<tier>::<effort>` | Noul, one per routable tier and effort (up to 15) | Whether that tier at that effort can reliably complete the request, apart from cost |
 
 A tier is asked about only when it can be routed to: Claude Code lists it, it has not failed in this session, and it is the current model or its full id has been learned with known effort support.
 
@@ -41,7 +41,7 @@ The state carries:
 - `recent_context`: short excerpts of recent user and assistant messages, for follow-ups such as "continue" (see [Recent context](#recent-context)).
 - `routing_context`: the current model, the conversation size and what each tier is known to hold (see [Context size](#context-size)), and the last attempt's failure counts. It holds no costs: cost is not Jev's to judge.
 
-Tier and effort descriptions are part of each question. They have defaults and can be changed with `/jev-model set`. The effort descriptions describe a reasoning budget (low: little deliberate reasoning; high: compares approaches and checks its work), not a kind of task.
+Tier and effort descriptions are part of each question. They have defaults and can be changed with `/jev-model set`. The effort descriptions describe a reasoning budget (low: little deliberate reasoning; high: compares approaches and checks its work; max: the most thorough the model offers), not a kind of task.
 
 ### How the pick is made
 
@@ -61,7 +61,7 @@ Only when all of these hold. Otherwise the step goes as the engine resolved it, 
 - The target has not failed earlier in this session.
 - The step is the main conversation's. Subagent steps keep their own model.
 
-**Effort.** The router sends only `low`, `medium` or `high`. It sends effort only on a step that already carries one, meaning the model takes effort. After a model switch, it sends effort only to a target seen taking effort, and none to a target that takes none. The API response does not report effort, so the log shows the effort *requested*.
+**Effort.** The router sends one of the five fixed levels (`low`, `medium`, `high`, `xhigh`, `max`). It sends effort only on a step that already carries one, meaning the model takes effort. After a model switch, it sends effort only to a target seen taking effort, and none to a target that takes none. The API response does not report effort, so the log shows the effort *requested*.
 
 **Within a turn.** The decision is bound to the turn at `turn.start`, and the first main step resolves the final model and effort. Every later step of that turn, tool loops included, reuses it, so a turn never switches back and forth. A prompt typed during a running turn joins that turn and keeps its decision.
 
@@ -81,7 +81,7 @@ pair cost         = first request's context + (H − 1) × N × read / 1e6 + H �
 
 - **Staying** means the same model at the same effort as the last request. Changing effort rebuilds the cache as a switch does (the Prompt caching docs list an effort change as invalidating the cached prefix). With the current effort unknown (no response seen yet), or a model that takes no effort, effort is not counted as a change.
 - **Write price** follows the cache lifetime: 1.25× input for 5 minutes, 2× for an hour.
-- **Output** (thinking included) is what main requests at that effort were seen producing: a moving average per effort, kept across sessions in `$.store` under `outputs` (numbers only). An effort not seen yet is scaled from the nearest one seen by `effort_output_low/medium/high` (1 / 2 / 4, assumptions). Before any output is seen, output is left out of every pair alike.
+- **Output** (thinking included) is what main requests at that effort were seen producing: a moving average per effort, kept across sessions in `$.store` under `outputs` (numbers only). An effort not seen yet is scaled from the nearest one seen by `effort_output_<level>` (1 / 2 / 4 / 8 / 16, assumptions). Before any output is seen, output is left out of every pair alike.
 - **Current model**: the model that answered last; before any response was seen (a new session or a plugin reload), the session model mapped to its learned id.
 
 Unknowns stay unknown: a pair whose model has no price, or a conversation whose size is unknown, has no cost and sorts after the costed ones.
@@ -139,7 +139,7 @@ With `jev_context_enabled` on (default), Jev gets up to `jev_context_chars` (200
 
 **Automatic probe.** With `auto_probe` on (default), the router probes without being asked: when a turn starts and a listed family's id or effort support is not known on this Claude Code (first use, or after an update), and when a routed request to a family fails (its id may have changed). Each family is probed at most once per load, with one tiny background subagent; a toast says so. The resend check is never armed automatically, since it sends a request meant to fail. A probe subagent's reply ("OK") would enter the conversation as another session's message and start a turn of its own, so it is dropped with one line, `jev-router: model probe finished`. Model routing `off` probes nothing.
 
-**Effort levels.** Claude Code has five effort levels (`low`, `medium`, `high`, `xhigh`, `max`) and silently downgrades a level a model does not take. The router routes only `low`, `medium` and `high`: a mod cannot learn which higher levels a model takes. A probe on Claude Code 2.1.296 showed that a subagent's step carries the level asked whatever the model, and that no classic event reports the level applied for a subagent `$.agent.spawn` started.
+**Effort levels.** The five levels Claude Code names (`low`, `medium`, `high`, `xhigh`, `max`) are fixed in `model.ts`, and Jev judges every routable tier at every one. Claude Code silently lowers a level a model does not take, and a mod cannot learn which a model takes: a probe on Claude Code 2.1.296 showed that a subagent's step carries the level asked whatever the model, and that no classic event reports the level applied for a subagent `$.agent.spawn` started. So a pair Jev judges at `xhigh` or `max` may actually run one level lower, and it is costed at the level asked. Because the cheapest able pair runs, a higher level is chosen only when no cheaper pair is judged able.
 
 ## Settings
 
@@ -164,12 +164,12 @@ The rest are kept off the page, saved in `$.store`, and changed with `/jev-model
 | Name | Default | Range |
 |---|---|---|
 | `model_haiku` / `model_sonnet` / `model_opus` | see `/jev-model settings` | up to 500 characters |
-| `effort_low` / `effort_medium` / `effort_high` | see `/jev-model settings` | up to 500 characters |
+| `effort_low` / `effort_medium` / `effort_high` / `effort_xhigh` / `effort_max` | see `/jev-model settings` | up to 500 characters |
 | `cache_min_tokens` | 20000 | 0 to 10000000 |
 | `cache_min_hit_ratio` | 0.8 | 0 to 1 |
 | `cache_ttl` | auto | auto / 5m / 1h |
 | `cost_horizon` | 5 | 1 to 100 requests |
-| `effort_output_low` / `effort_output_medium` / `effort_output_high` | 1 / 2 / 4 | 0.01 to 100 (relative output, until seen) |
+| `effort_output_low` … `effort_output_max` | 1 / 2 / 4 / 8 / 16 | 0.01 to 100 (relative output, until seen) |
 | `auto_probe` | true | true / false |
 | `jev_context_chars` | 2000 | 0 to 8000 |
 | `jev_context_messages` | 6 | 1 to 12 |

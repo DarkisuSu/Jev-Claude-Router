@@ -102,7 +102,7 @@ describe('model routing', () => {
     await turn($, w)
 
     const questions = JSON.parse(w.fetches[0]?.body ?? '{}').questions
-    expect(Object.keys(questions).filter(k => k.startsWith('feasible::'))).toEqual(['haiku', 'opus'].flatMap(f => ['low', 'medium', 'high'].map(e => `feasible::${f}::${e}`)))
+    expect(Object.keys(questions).filter(k => k.startsWith('feasible::'))).toEqual(['haiku', 'opus'].flatMap(f => ['low', 'medium', 'high', 'xhigh', 'max'].map(e => `feasible::${f}::${e}`)))
     expect(questions.model_tier).toBeUndefined()
     expect(questions.effort_level).toBeUndefined()
   })
@@ -133,6 +133,36 @@ describe('model routing', () => {
     await step($, 't1', 0)
 
     expect(seen[0]).toEqual({ model: HAIKU, effort: 'medium', agentId: undefined })
+  })
+
+  test('on: xhigh and max are asked about and sent when they are the only able pairs, and cost more than lower efforts', { options: ON }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, LEARNED)
+    const w = world(on, answers({ 'opus::xhigh': 0.8, 'opus::max': 0.95 }))
+    const seen = bottom(on)
+
+    await turn($, w)
+    await step($, 't1', 0)
+
+    const questions = JSON.parse(w.fetches[0]?.body ?? '{}').questions
+    expect(questions['feasible::opus::xhigh'].instructions).toContain('Deeper reasoning than high')
+    expect(questions['feasible::opus::max'].instructions).toContain('most thorough reasoning')
+    // Both clear the threshold; the cheaper (xhigh) runs.
+    expect(seen[0]).toEqual({ model: OPUS, effort: 'xhigh', agentId: undefined })
+    const round = logLines(w).find(l => l.type === 'round')!
+    expect(round.candidates.filter((c: any) => c.pair.startsWith('opus/')).map((c: any) => c.pair)).toEqual(['opus/low', 'opus/medium', 'opus/high', 'opus/xhigh', 'opus/max'])
+  })
+
+  test('on: max is sent when it is the only pair Jev judges able', { options: ON }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, LEARNED)
+    const w = world(on, answers({ 'opus::max': 0.95 }))
+    const seen = bottom(on)
+
+    await turn($, w)
+    await step($, 't1', 0)
+
+    expect(seen[0]).toEqual({ model: OPUS, effort: 'max', agentId: undefined })
   })
 
   test('on: a cheaper pair below the feasibility threshold gives way to a dearer feasible one', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {

@@ -3,6 +3,8 @@ import type { EngineInterface, PluginOptions, PromptOrigin, Register } from 'cla
 import {
   availableFrom,
   decide,
+  EFFORTS,
+  isEffort,
   familyOf,
   learn,
   noteContext,
@@ -61,7 +63,7 @@ type Config = {
   fallback: Fallback
   feasibleThreshold: number
   autoProbe: boolean
-  effortLevels: [string, string, string]
+  effortLevels: Record<Effort, string>
   modelDescriptions: Record<string, string>
   cache: ReturnType<typeof sharedConfig>['cache']
   cost: ReturnType<typeof sharedConfig>['cost']
@@ -776,7 +778,7 @@ function statusText() {
     `learned: ${caps}`,
     `failed this session: ${[...S.failed].join(', ') || 'none'}`,
     `subscription rate limits seen: ${S.subscription === undefined ? 'not yet' : S.subscription ? 'yes' : 'no'}`,
-    `costs: cache TTL ${c.cache.ttl}${c.cache.ttl === 'auto' ? ` (${S.subscription ? '1h, subscription' : '5m until a subscription or a 1h write is seen'})` : ''}; output per request by effort ${(['low', 'medium', 'high'] as const).map(e => `${e} ${S.outputs[e] ? `${S.outputs[e]!.avg} tokens seen` : `ratio ${c.cost.ratios[e]}`}`).join(', ')}`,
+    `costs: cache TTL ${c.cache.ttl}${c.cache.ttl === 'auto' ? ` (${S.subscription ? '1h, subscription' : '5m until a subscription or a 1h write is seen'})` : ''}; output per request by effort ${EFFORTS.map(e => `${e} ${S.outputs[e] ? `${S.outputs[e]!.avg} tokens seen` : `ratio ${c.cost.ratios[e]}`}`).join(', ')}`,
     `Jev context: recent excerpts ${c.awareness.enabled ? 'on' : 'off'} (${c.awareness.messages} messages, ${c.awareness.maxChars} chars)`,
     last,
     ...(S.lastStep ? [cacheText(S.lastStep)] : []),
@@ -1088,9 +1090,9 @@ export const register: Register = (on, options) => {
       const ideal = planStep(e, decision, config.routing === 'off' ? 'off' : 'on', S.caps, S.failed, config.fallback)
       const model = ideal.model
       const proposedEffort = ideal.effort
-      // Never introduce xhigh/max/numeric effort from a prior request. Such
-      // engine-provided levels may pass through unchanged on this step only.
-      const effort = proposedEffort === e.effort || proposedEffort === undefined || ['low', 'medium', 'high'].includes(String(proposedEffort)) ? proposedEffort : e.effort
+      // Only a named level is ever introduced (never a numeric budget carried
+      // over from another request); the engine's own pass through unchanged.
+      const effort = proposedEffort === e.effort || proposedEffort === undefined || isEffort(proposedEffort) ? proposedEffort : e.effort
       const advice = decision && config.routing !== 'off'
         ? cacheAdvice(baseline, { model, effort }, S.cache, await $.clock.now(), cacheNow())
         : undefined

@@ -4,8 +4,10 @@
 export const FAMILIES = ['haiku', 'sonnet', 'opus'] as const
 export type Family = (typeof FAMILIES)[number]
 
-// Only these effort levels are ever sent; xhigh and max are left alone.
-export const EFFORTS = ['low', 'medium', 'high'] as const
+// The effort levels Claude Code names, low to max. Fixed here: a mod cannot
+// learn which a model takes, and the engine silently lowers a level the
+// model does not take, so a pair Jev judges at xhigh may run one level lower.
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 export type Effort = (typeof EFFORTS)[number]
 
 export type RoutingMode = 'off' | 'dry-run' | 'on'

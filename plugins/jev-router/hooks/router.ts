@@ -34,8 +34,8 @@ export type RouteConfig = {
   // Model families to ask Jev about; none, and model routing is not asked.
   modelFamilies: readonly string[]
   modelDescriptions?: Record<string, string>
-  // The three effort level descriptions, low to high; absent, the defaults.
-  effortLevels?: readonly [string, string, string]
+  // The effort level descriptions; absent, the defaults.
+  effortLevels?: Readonly<Record<Effort, string>>
   recentContext?: string
   routingContext?: RoutingFacts
 }
@@ -102,9 +102,9 @@ export const rankWideBody = (request: string, skills: readonly Skill[], config: 
   // Every tier at every effort, so even one routable tier has an effort to pick.
   for (const family of config.modelFamilies) {
     const description = config.modelDescriptions?.[family] ?? DEFAULT_MODEL_CRITERIA[family] ?? family
-    EFFORTS.forEach((effort, i) => {
-      questions[`feasible::${family}::${effort}`] = feasibleQuestion(family, description, effort, (config.effortLevels ?? DEFAULT_EFFORT_LEVELS)[i]!)
-    })
+    for (const effort of EFFORTS) {
+      questions[`feasible::${family}::${effort}`] = feasibleQuestion(family, description, effort, (config.effortLevels ?? DEFAULT_EFFORT_LEVELS)[effort])
+    }
   }
   return { state: state(request, config.recentContext, config.routingContext), model: config.model, questions }
 }

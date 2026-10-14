@@ -125,7 +125,7 @@ const options = { typesafe_api_key: FAKE_KEY, model_routing: 'on', write_log: tr
 // Jev judges only the chosen tier at the chosen effort (0 low, 1 medium,
 // 2 high) able to do the work; `fail` makes Jev answer with an error.
 type Choice = { model: string; score: number; fail?: boolean }
-const LEVELS = ['low', 'medium', 'high']
+const LEVELS = ['low', 'medium', 'high', 'xhigh', 'max']
 const jev = (choice: Choice) => (q: Record<string, unknown>) => {
   if (choice.fail) return { status: 500, body: { error: 'down' } }
   const body: any = 'acts_on_user_system' in q ? rankWide(0.9, 'speckit-specify', { [`${choice.model}::${LEVELS[choice.score]}`]: 0.95 }, q) : rerank(q, { 'speckit-specify': 0.9 })
@@ -347,14 +347,14 @@ describe('settings homes', () => {
     const before = sharedConfig({ feasibility_threshold: 0.7 }, store)
     expect(sharedConfig({ feasibility_threshold: 0.7 }, JSON.parse(JSON.stringify(store)))).toEqual(before)
     expect(before.modelDescriptions.haiku).toBe('My Small Work')
-    expect(before.effortLevels[2]).toBe('My High')
+    expect(before.effortLevels.high).toBe('My High')
     expect(before.cache.minHitRatio).toBe(0.9)
     expect(before.feasibleThreshold).toBe(0.7)
     // A value in the wrong home is ignored.
-    expect(sharedConfig({ effort_high: 'Page High' }).effortLevels[2]).toBe(DEFAULT_EFFORT_LEVELS[2])
+    expect(sharedConfig({ effort_high: 'Page High' }).effortLevels.high).toBe(DEFAULT_EFFORT_LEVELS.high)
     expect(sharedConfig({}, { feasibility_threshold: 0.7 }).feasibleThreshold).toBe(0.6)
     expect(sharedConfig({ cost_horizon: 9 }).cost.horizon).toBe(5)
-    expect(sharedConfig({}, { effort_high: '' }).effortLevels[2]).toBe(DEFAULT_EFFORT_LEVELS[2])
+    expect(sharedConfig({}, { effort_high: '' }).effortLevels.high).toBe(DEFAULT_EFFORT_LEVELS.high)
   })
   test('cache values validate fractions, choices and integers', () => {
     expect(parseSetting('cache_min_hit_ratio', '0.93')).toBe(0.93)

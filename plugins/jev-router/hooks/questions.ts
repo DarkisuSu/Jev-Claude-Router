@@ -2,6 +2,8 @@
 // advises, so thresholds and wording are tuned in one place.
 // Adapted from https://docs.typesafe.ai/cookbooks/skill_suggestion.
 
+import type { Effort } from './model'
+
 export const ENDPOINT = 'https://api.typesafe.ai/v1/systemone'
 
 // How many ranked skills request 2 rereads by default (the cookbook's SHORTLIST).
@@ -66,11 +68,13 @@ export const DEFAULT_MODEL_CRITERIA: Record<string, string> = {
 
 // What each effort gives the model, low to high: a reasoning budget, not a
 // kind of work. The person can rewrite them with /jev-model set.
-export const DEFAULT_EFFORT_LEVELS: readonly [string, string, string] = [
-  'Little deliberate reasoning: it answers or acts directly. Enough when the path is clear.',
-  'Moderate reasoning before acting: it weighs what it reads and checks the obvious risks.',
-  'Extended reasoning: it compares approaches, traces causes across parts and checks its work before acting.',
-]
+export const DEFAULT_EFFORT_LEVELS: Readonly<Record<Effort, string>> = {
+  low: 'Little deliberate reasoning: it answers or acts directly. Enough when the path is clear.',
+  medium: 'Moderate reasoning before acting: it weighs what it reads and checks the obvious risks.',
+  high: 'Extended reasoning: it compares approaches, traces causes across parts and checks its work before acting.',
+  xhigh: 'Deeper reasoning than high: it works hard problems through step by step, tests its own conclusions and revisits them before acting.',
+  max: 'The most thorough reasoning the model offers: for work where a wrong answer is costly and time and tokens are no object.',
+}
 
 // Feasibility, one tier at one effort at a time and apart from cost: the
 // router takes the cheapest pair Jev judges able to complete the work.
