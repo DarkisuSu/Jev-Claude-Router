@@ -2,7 +2,7 @@
   "name": "jev-router",
   "displayName": "Jev Router",
   "version": "0.3.1",
-  "description": "Asks TypeSafe Jev on each new prompt which local skills fit and which Claude model and effort to use",
+  "description": "Routes skills and models with TypeSafe Jev and supplies automatic assistant-owned typed decisions throughout a task",
   "author": {
     "name": "Darkisu.Su"
   },
@@ -17,7 +17,7 @@
     "enabled": {
       "type": "boolean",
       "title": "General · Router enabled",
-      "description": "Turn the Jev skill router on or off without uninstalling it.\nDefault: on",
+      "description": "Turn skill selection, model routing and automatic decisions on or off without uninstalling the plugin.\nDefault: on",
       "default": true
     },
     "write_log": {
@@ -35,7 +35,13 @@
     "skill_routing": {
       "type": "boolean",
       "title": "Skill · Skill selection",
-      "description": "Suggest local skills for each prompt. Off: no skill is suggested and the skill index is not built; model routing (its own setting below) is unaffected. The Router enabled switch above stops both.\nDefault: on",
+      "description": "Suggest local skills for each prompt. Off: no skill is suggested and the skill index is not built; model routing and automatic decisions are unaffected. The Router enabled switch stops all three.\nDefault: on",
+      "default": true
+    },
+    "decision_routing": {
+      "type": "boolean",
+      "title": "Decision · Automatic decisions",
+      "description": "Expose the decide tool and instruct Claude to send narrow assistant-owned decisions to api.typesafe.ai with relevant task evidence. User choices, preferences and authorization stay with the user. Each tool call makes a separate Jev request; no actions are executed by the tool.\nDefault: on",
       "default": true
     },
     "mode": {

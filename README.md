@@ -1,6 +1,6 @@
 # Jev Claude Router
 
-A plugin marketplace with one plugin, **jev-router**. On each new prompt it asks [TypeSafe](https://docs.typesafe.ai) Jev which local skills fit and which Claude model and effort to use. How it works and how to configure it: [`plugins/jev-router`](plugins/jev-router/README.md).
+A plugin marketplace with one plugin, **jev-router**. On each new prompt it asks [TypeSafe](https://docs.typesafe.ai) Jev which local skills fit and which Claude model and effort to use. It also provides a typed decision tool and instructions for Claude to automatically consult Jev on assistant-owned decisions throughout a task. How it works and how to configure it: [`plugins/jev-router`](plugins/jev-router/README.md).
 
 ## Install
 

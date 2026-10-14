@@ -23,6 +23,7 @@ export const SHARED: Record<string, Spec> = {
   // On the settings page.
   feasibility_threshold: { where: 'page', kind: 'number', default: 0.6, min: 0, max: 1, what: 'A tier at an effort counts as able to do the work when Jev judges it at least this likely to complete it; the cheapest such pair runs' },
   jev_context_enabled: { where: 'page', kind: 'boolean', default: true, what: 'Send Jev short excerpts of recent conversation so follow-ups are judged in context' },
+  decision_routing: { where: 'page', kind: 'boolean', default: true, what: 'Let Claude automatically submit assistant-owned typed decisions to Jev throughout a task' },
 
   // In $.store, set with /jev-model set.
   model_haiku: { where: 'store', kind: 'text', default: DEFAULT_MODEL_CRITERIA.haiku!, what: 'What Jev is told Haiku work is' },
@@ -35,6 +36,7 @@ export const SHARED: Record<string, Spec> = {
   cost_horizon: { where: 'store', kind: 'number', default: 0, min: 0, max: 100, integer: true, what: 'Requests each pair is costed over: the first (a cache rebuild on a model switch) plus the later ones. 0: the median requests per turn of recent turns (5 until three turns are seen)' },
   cost_tolerance: { where: 'store', kind: 'number', default: 0.03, min: 0, max: 0.5, what: 'Feasible pairs costing within this share of the cheapest compete on feasibility: the likeliest runs. 0: the cheapest always runs' },
   auto_probe: { where: 'store', kind: 'boolean', default: true, what: 'Probe models automatically: on first use (no learned ids on this Claude Code) and after a routed request fails' },
+  decision_confidence_threshold: { where: 'store', kind: 'number', default: 0.6, min: 0.5, max: 1, what: 'Decision answers below this are uncertain: Choice/Score confidence, or Noul probability of the likelier yes/no outcome' },
   jev_context_chars: { where: 'store', kind: 'number', default: 2000, min: 0, max: 8000, integer: true, what: 'Most characters of recent conversation sent to Jev; 0 sends none' },
   jev_context_messages: { where: 'store', kind: 'number', default: 6, min: 1, max: 12, integer: true, what: 'Most recent user/assistant messages those excerpts come from' },
 }
@@ -66,6 +68,8 @@ export const parseSetting = (name: string, raw: string): string | number | boole
 export const sharedConfig = (page: Record<string, unknown>, store: Record<string, unknown> = {}) => {
   const v = (name: string) => settingValue(page, name, store)
   return {
+    decisionRouting: v('decision_routing') as boolean,
+    decisionConfidence: v('decision_confidence_threshold') as number,
     feasibleThreshold: v('feasibility_threshold') as number,
     autoProbe: v('auto_probe') as boolean,
     modelDescriptions: Object.fromEntries(['haiku', 'sonnet', 'opus'].map(f => [f, String(v(`model_${f}`))])),

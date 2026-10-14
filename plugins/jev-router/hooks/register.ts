@@ -25,6 +25,7 @@ import { cacheAdvice, cacheEvidence, observeUsage, resetCache, withContext, type
 import { SHARED, parseSetting, settingValue, sharedConfig } from './settings'
 import { JevError, route, type RouteResult, type Send } from './router'
 import { EMPTY_ATTEMPT, recentContext, routingFacts, scrubText, type AttemptFacts } from './awareness'
+import { DECISION_TOOL, DECISION_DESCRIPTION, DECISION_INSTRUCTIONS, DECISION_SCHEMA, prepareDecision, evaluateDecision } from './decisions'
 import {
   BODY_CHARS,
   assembleIndex,
@@ -56,6 +57,8 @@ type Config = {
   key: string
   enabled: boolean
   skillRouting: boolean
+  decisionRouting: boolean
+  decisionConfidence: number
   mode: 'hint' | 'inject'
   shortlist: number
   gateThreshold: number
@@ -796,6 +799,7 @@ function statusText() {
   return [
     `jev-router model routing: ${c.routing} (the cheapest tier/effort Jev judges ≥ ${c.feasibleThreshold} feasible, the likeliest among those within ${Math.round(c.cost.tolerance * 100)}% of its cost; costed over ${horizonNow().horizon} requests (${horizonNow().source}); fallback ${c.fallback} when Jev gives no answer)`,
     `skill selection: ${c.skillRouting ? 'on' : 'off'} (gate ≥ ${c.gateThreshold}, fits ≥ ${c.fitsThreshold}, shortlist ${c.shortlist}, load mode ${c.mode})`,
+    `decision routing: ${c.decisionRouting ? 'on' : 'off'} (assistant-owned judgments only; confidence threshold ${c.decisionConfidence})`,
     `models from this Claude Code (${S.available.source}): ${fams}`,
     `log: ${c.writeLog ? 'on' : 'off'}`,
     `learned: ${caps}`,
@@ -853,6 +857,9 @@ export const register: Register = (on, options) => {
     await refreshModels($)
     await loadCaps($)
     await loadHidden($)
+    if (config.enabled && config.key && config.decisionRouting) {
+      await $.tool.register({ name: 'decide', description: DECISION_DESCRIPTION, inputSchema: DECISION_SCHEMA, isDeferred: false })
+    }
     await log($, {
       type: 'session',
       enabled: config.enabled,
@@ -871,6 +878,29 @@ export const register: Register = (on, options) => {
     })
     return next(e)
   })
+
+  // A stable system section keeps the policy available during tool loops and
+  // after compaction. Only add it to prompts actually offering the tool.
+  on('prompt.compose', async ($, e, next) => {
+    const result = await next(e)
+    if (!config.enabled || !config.key || !config.decisionRouting || !e.tools.includes(DECISION_TOOL)) return result
+    const id = 'jev-router:decisions'
+    return { ...result, sections: [...result.sections.filter(s => s.id !== id), { id, text: DECISION_INSTRUCTIONS, scope: 'session' as const }] }
+  }).catch(($, e, next) => next(e))
+
+  on('tool.call', { tool: 'mcp__jev-router__decide' }, async ($, e) => {
+    const input = { decision_owner: e.decision_owner, authority: e.authority, state: e.state, questions: e.questions }
+    const prepared = prepareDecision(input, [config.key])
+    if ('status' in prepared) return { result: prepared }
+    if (!config.enabled || !config.key || !config.decisionRouting) return { result: { status: 'unavailable', reason: !config.key ? 'no-key' : 'decision-routing-disabled' } }
+    if (!S.hiddenLoaded) await loadHidden($)
+    const started = await $.clock.now()
+    const result = await evaluateDecision(prepared, config.model, config.decisionConfidence, sender($, started + config.timeoutMs))
+    // Question ids, rubrics, facts, options and answers are model-authored text:
+    // keep only counts and numeric call metadata in the optional log.
+    await log($, { type: 'decision', outcome: result.status, question_count: Object.keys(prepared.questions).length, uncertain_count: result.uncertain?.length ?? 0, threshold: config.decisionConfidence, total_ms: (await $.clock.now()) - started })
+    return { result }
+  }).catch(() => ({ result: { status: 'unavailable', reason: 'decision-hook-failed' } }))
 
   on('prompt.submit', async ($, e, next) => {
     await checkSession($)

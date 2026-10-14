@@ -5,6 +5,8 @@ A Claude Code mod that asks TypeSafe Jev on each new prompt two things:
 - Which local skills fit the prompt. It follows the two-request flow in the [Skill Suggestion cookbook](https://docs.typesafe.ai/cookbooks/skill_suggestion).
 - Whether each Claude model tier, at each reasoning effort, can do the work. Jev sees the request, short excerpts of the recent conversation, the conversation size and what each tier is known to hold. The router costs every pair (cache rebuild and output included) and applies the cheapest one Jev judges able to each main request through `turn.step`.
 
+During the task it also gives Claude a general-purpose decision tool, with system instructions to automatically submit eligible assistant-owned judgments to Jev. The questions and options come from the current task, with no fixed list of action categories. This feature is independent of prompt-time skill and model routing.
+
 Release installation: `/plugin install jev-router --marketplace DarkisuSu/Jev-Claude-Router#main`. Unreleased changes are tested from the local `development` checkout.
 
 ## Skill routing
@@ -16,7 +18,7 @@ Release installation: `/plugin install jev-router --marketplace DarkisuSu/Jev-Cl
 
 **No match, error, timeout or no key:** the prompt goes on with nothing added, so Claude's own skill behaviour stands.
 
-**Switching it off.** `Skill selection` on the settings page (or `/jev-model skills on|off`) is separate from model routing. Off, the skill index is not built, no skill is ranked, gated or suggested, and the request to Jev carries the model questions alone (the round's reason is `skill-routing-off`). With model routing off as well, Jev is not called at all. `Router enabled` stops both.
+**Switching it off.** `Skill selection` on the settings page (or `/jev-model skills on|off`) is separate from model routing. Off, the skill index is not built, no skill is ranked, gated or suggested, and the prompt-time request to Jev carries the model questions alone (the round's reason is `skill-routing-off`). With model routing off as well, there is no prompt-time Jev call; the decision tool can still make its own calls. `Router enabled` stops all three features.
 
 **Load modes:**
 
@@ -24,6 +26,28 @@ Release installation: `/plugin install jev-router --marketplace DarkisuSu/Jev-Cl
 - `inject`: adds the SKILL.md text in a block marked `activation="injected-not-native"`. This is not a native activation.
 
 **Load tracking:** a `tool.call` hook on the Skill tool records real native loads, with `skill.prompt` as a second source. Each turn's log entry marks every routed skill `native-loaded`, `injected` or `not-loaded`.
+
+## Automatic decisions during a task
+
+With `Decision · Automatic decisions` on (default), a TypeSafe key configured and the router enabled, the plugin registers `mcp__jev-router__decide` as an upfront tool and adds a stable system-prompt section whenever that tool is offered. No separate Skill activation is needed. The instructions remain available during tool loops and are composed again after compaction. A subagent gets them only if its prompt offers the tool.
+
+Claude determines whether a decision is within its delegated authority, gathers the relevant evidence and formulates narrow typed questions. It sends `decision_owner`, an `authority` description, a `state` object (goals, constraints, facts and unknowns), and `questions` keyed by simple ids. Each question asks one thing:
+
+| Type | Input | Result |
+|---|---|---|
+| `choice` | 2–255 task-specific option ids and descriptions | Selected option, probabilities and confidence |
+| `noul` | One yes/no proposition, optionally with true/false descriptions | Probability that it is true |
+| `score` | 2–10 concrete ordered levels for one dimension | Probability-weighted score, probabilities, confidence and level legend |
+
+These are the [TypeSafe primitives](https://docs.typesafe.ai/primitives). The tool accepts 1–16 independent questions per call, with a shared state, and a maximum input length of 20000 characters. It rejects oversized input rather than silently cutting off evidence. It uses the existing secure API key, `jev_model` and `timeout_ms`; each invocation makes one separate request to `api.typesafe.ai`. It executes no actions.
+
+**User decisions stay with the user.** The instructions exclude user-reserved judgments, preferences, unresolved requirements, consent and authorization, and tell Claude to honor explicit choices directly. A call marked `decision_owner: user` returns `requires_user` before any network request. Ownership is declared by Claude; the plugin cannot independently prove that a question belongs to the assistant. Jev's answers grant no permission and do not override user instructions or execution permissions.
+
+**Results and failures.** The plugin validates answer types, supplied option membership, probability ranges/distributions and score consistency. It returns `decided` or `uncertain`, retaining the typed answers. The configurable `decision_confidence_threshold` defaults to 0.6: Choice/Score use confidence, while Noul uses the probability of its likelier yes/no outcome (an exact 0.5 remains uncertain). This is a starting point, not a measured optimum or guarantee of correctness. Invalid input returns `invalid_request`; disabled routing, a missing key, an HTTP error, timeout or malformed answer returns `unavailable`, with no invented decision. Claude is instructed to gather evidence or reason further for uncertainty, and use its own judgment within its delegated scope when Jev is unavailable. It asks the user when their input or decision is required, and never loops on an unchanged question.
+
+**Information sent.** Claude explicitly supplies relevant evidence; the plugin does not read files or attach the transcript on behalf of this tool. Common credential fields and credential patterns, including the configured key, are redacted on a best-effort basis throughout state, authority and question descriptions. `jev_context_enabled` controls the existing prompt-time excerpts, not this explicitly supplied decision state. Decision logs hold only outcome, question/uncertainty counts, threshold and duration; they contain no state, authority, questions, option ids or answers.
+
+**Controls and limits.** Turn this feature off in the settings page or with `/jev-model set decision_routing false`; restore it with `true` and reload the plugin if its tool is not yet listed. Set the threshold with `/jev-model set decision_confidence_threshold <value>` (0.5–1). Skill selection and model routing retain their own controls; model `dry-run` applies only to model rewriting, so decision calls still contact Jev. Automatic consultation depends on Claude following the system instructions: mods cannot observe every internal reasoning decision, so the feature does not guarantee every eligible decision is submitted. The tests verify the interface and hooks with mocked Jev replies, not real-model adherence or judgment quality.
 
 ## Model routing
 
@@ -156,6 +180,7 @@ The settings page holds the settings people change:
 | Write log | off |
 | Reset all settings to defaults | off |
 | Skill selection | on |
+| Automatic decisions (`decision_routing`) | on |
 | Load mode | hint |
 | Gate threshold | 0.3 |
 | Fits threshold | 0.3 |
@@ -176,6 +201,7 @@ The rest are kept off the page, saved in `$.store`, and changed with `/jev-model
 | `cost_horizon` | 0 (learned from recent turns) | 0 to 100 requests |
 | `cost_tolerance` | 0.03 | 0 to 0.5 (share of the cheapest feasible cost) |
 | `auto_probe` | true | true / false |
+| `decision_confidence_threshold` | 0.6 | 0.5 to 1 |
 | `jev_context_chars` | 2000 | 0 to 8000 |
 | `jev_context_messages` | 6 | 1 to 12 |
 | `jev_model` | jev-latest | 1 to 64 characters |
@@ -212,6 +238,7 @@ Logs go to `~/.claude/plugins/data/jev-router-jev-local/logs/YYYY-MM-DD.jsonl` (
 - `round`: Jev's skill answers, `jev_feasible` per tier and effort, `candidates` (every pair with its feasibility and cost parts, cheapest first), `cost_basis` (context size, cache status, cache lifetime source, horizon and where it came from, tolerance, output sample count and median per effort), the `decision` (pair, `how`, cost, threshold), recent-context metadata (source, message count, length; never the text), and each Jev call's status, latency and token counts.
 - `step`: the model and effort a request came with, Jev's recommended pair, the final recommendation, what was sent, the model the API reported answering, reasons and fallback. `observed_usage` holds actual counters or null; `cache_advice` holds the estimated cache state and, when calculable, the older switching estimate for a model change.
 - `load`, `turn`, `probe`, `session`, `reset`.
+- `decision`: typed-decision outcome, question count, uncertain count, threshold and duration only.
 
 The log never holds the API key, request headers, prompt text, excerpt text or skill text.
 
