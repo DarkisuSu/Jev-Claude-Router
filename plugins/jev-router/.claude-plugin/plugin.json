@@ -1,7 +1,7 @@
 {
   "name": "jev-router",
   "displayName": "Jev Router",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Asks TypeSafe Jev on each new prompt which local skills fit and which Claude model and effort to use",
   "author": {
     "name": "Darkisu.Su"

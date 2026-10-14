@@ -225,7 +225,7 @@ The router never touches Claude's credentials. Jev requests go to `api.typesafe.
 
 - **`main`** holds releases only. It is always the latest release, and installs are pinned to it (`--marketplace DarkisuSu/Jev-Claude-Router#main`).
 - **`development`** holds every change. Work and test there; a release is a merge of `development` into `main`.
-- The version is the `version` in `plugin.json`. It is raised on `development` as part of a release, and `main` then carries it. Versions are not marked with tags: a version is what `main` held after its merge. (The `v0.3.0` tag predates this rule and is left as it is; no new tags are made.)
+- The version is the `version` in `plugin.json`. It is raised on `development` as part of a release, and `main` then carries it. Each release is tagged `v<version>` (for example `v0.3.1`) on the `main` commit that carries it. A tag marks a release only; installs follow `main`, not a tag.
 - This section is kept identical on every branch. A change to these rules is made on `development` and merged into `main` in the same step.
 
 ## Develop
