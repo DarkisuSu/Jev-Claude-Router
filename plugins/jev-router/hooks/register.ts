@@ -19,7 +19,7 @@ import {
   type Step,
   type Effort,
 } from './model'
-import { learnOutput, pairCost, type OutputStats } from './cost'
+import { horizonFor, learnOutput, median, normalizeStats, outputSummary, pairCost, type OutputStats } from './cost'
 import { ENDPOINT } from './questions'
 import { cacheAdvice, cacheEvidence, observeUsage, resetCache, withContext, type CacheState, type CacheAdvice, type UsageLike } from './cache'
 import { SHARED, parseSetting, settingValue, sharedConfig } from './settings'
@@ -44,6 +44,9 @@ const KEPT_TURNS = 20
 const CAPS_KEY = 'caps'
 // Average output per main request at each effort (numbers only), across sessions.
 const OUTPUTS_KEY = 'outputs'
+// Main requests per turn of the latest turns (numbers only), across sessions.
+const TURNLEN_KEY = 'turnlen'
+const KEPT_TURN_LENGTHS = 20
 const PROBE_TEXT = 'Reply with exactly: OK'
 // A model id no account has: the probe's check that a failed request can be
 // sent again on the session's own model.
@@ -52,6 +55,7 @@ const PROBE_BAD_MODEL = 'jev-router-probe-no-such-model'
 type Config = {
   key: string
   enabled: boolean
+  skillRouting: boolean
   mode: 'hint' | 'inject'
   shortlist: number
   gateThreshold: number
@@ -78,6 +82,7 @@ const num = (v: unknown, fallback: number, min: number, max: number) =>
 export const readConfig = (o: PluginOptions): Config => ({
   key: typeof o.typesafe_api_key === 'string' ? o.typesafe_api_key.trim() : '',
   enabled: o.enabled !== false,
+  skillRouting: o.skill_routing !== false,
   mode: o.mode === 'inject' ? 'inject' : 'hint',
   shortlist: 3,
   gateThreshold: num(o.gate_threshold, 0.3, 0, 1),
@@ -212,6 +217,9 @@ const S: {
   // Context windows Claude Code reported, for the session model only.
   windows: Partial<Record<Family, number>>
   outputs: OutputStats
+  turnLengths: number[]
+  // Main requests so far in each running turn.
+  stepCounts: Map<string, number>
   executed?: { model: string; effort?: string | number }
   attempts: Map<string, AttemptFacts>
   lastAttempt?: AttemptFacts
@@ -236,6 +244,8 @@ const S: {
   turnPlans: new Map(),
   windows: {},
   outputs: {},
+  turnLengths: [],
+  stepCounts: new Map(),
   attempts: new Map(),
 }
 
@@ -299,6 +309,15 @@ async function recordStep($: EngineInterface, usage: UsageLike | null | undefine
   entry.attempt_facts = facts
   if (usage?.model) await learnStep($, { model: usage.model, effort: usage.model === sent.model ? sent.effort : undefined }, usage.model === sent.model, 'main-step')
   if (usage?.model) await noteContextSeen($, usage.model, usage)
+  if (entry.type === 'step') {
+    const turn = String(entry.turn_id)
+    S.stepCounts.set(turn, (S.stepCounts.get(turn) ?? 0) + 1)
+    while (S.stepCounts.size > 50) {
+      const oldest = S.stepCounts.keys().next().value
+      if (oldest === undefined) break
+      S.stepCounts.delete(oldest)
+    }
+  }
   if (entry.type === 'step' && usage?.model === sent.model) {
     const outputs = learnOutput(S.outputs, sent.effort, usage.output_tokens)
     if (outputs) {
@@ -544,16 +563,20 @@ async function loadCaps($: EngineInterface) {
     S.caps = undefined
   }
   try {
-    const outputs = await $.store.get(OUTPUTS_KEY)
-    S.outputs = outputs && typeof outputs === 'object' ? (outputs as OutputStats) : {}
+    S.outputs = normalizeStats(await $.store.get(OUTPUTS_KEY))
+    const lengths = await $.store.get(TURNLEN_KEY)
+    S.turnLengths = Array.isArray(lengths) ? lengths.filter((n): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0).slice(-KEPT_TURN_LENGTHS) : []
   } catch {
     S.outputs = {}
+    S.turnLengths = []
   }
 }
 
 // The cache settings with what this session shows: a subscription caches
 // for an hour.
-const cacheNow = () => ({ ...S.config.cache, subscription: S.subscription === true })
+const horizonNow = () => horizonFor(Number(S.config.cost.horizon), S.turnLengths)
+const costNow = () => ({ horizon: horizonNow().horizon, tolerance: S.config.cost.tolerance })
+const cacheNow = () => ({ ...S.config.cache, breakevenTurns: horizonNow().horizon, subscription: S.subscription === true })
 
 async function saveCaps($: EngineInterface, update: (caps: Caps) => Caps) {
   const caps = update(S.caps ?? { version: S.version, families: {} })
@@ -710,7 +733,7 @@ async function finishRound($: EngineInterface, why: string) {
 }
 
 // Saves one of this plugin's userConfig fields through /config; the plugin reloads.
-async function setOption($: EngineInterface, field: string, value: string) {
+async function setOption($: EngineInterface, field: string, value: string | boolean) {
   const rows = await $.config.list()
   const row = rows.find(r => r.key.endsWith(`.${field}`) && r.key.includes($.plugin.name))
   if (!row) return `jev-router: no /config row for ${field} was found. Run /reload-plugins and try again, or set it in the plugin's settings.`
@@ -771,18 +794,18 @@ function statusText() {
     ? `last step: ${String(S.lastStep.from_model)} → ${String(S.lastStep.sent_model)} (answered by ${String(S.lastStep.answered_by ?? '?')}), effort ${String(S.lastStep.from_effort ?? '-')} → ${String(S.lastStep.sent_effort ?? '-')} [${(S.lastStep.reasons as string[] | undefined)?.join(', ') ?? ''}]`
     : 'no routed step yet'
   return [
-    `jev-router model routing: ${c.routing} (the cheapest tier/effort Jev judges ≥ ${c.feasibleThreshold} feasible; costed over ${c.cost.horizon} requests; fallback ${c.fallback} when Jev gives no answer)`,
-    `skills: gate ≥ ${c.gateThreshold}, fits ≥ ${c.fitsThreshold}, shortlist ${c.shortlist}, load mode ${c.mode}`,
+    `jev-router model routing: ${c.routing} (the cheapest tier/effort Jev judges ≥ ${c.feasibleThreshold} feasible, the likeliest among those within ${Math.round(c.cost.tolerance * 100)}% of its cost; costed over ${horizonNow().horizon} requests (${horizonNow().source}); fallback ${c.fallback} when Jev gives no answer)`,
+    `skill selection: ${c.skillRouting ? 'on' : 'off'} (gate ≥ ${c.gateThreshold}, fits ≥ ${c.fitsThreshold}, shortlist ${c.shortlist}, load mode ${c.mode})`,
     `models from this Claude Code (${S.available.source}): ${fams}`,
     `log: ${c.writeLog ? 'on' : 'off'}`,
     `learned: ${caps}`,
     `failed this session: ${[...S.failed].join(', ') || 'none'}`,
     `subscription rate limits seen: ${S.subscription === undefined ? 'not yet' : S.subscription ? 'yes' : 'no'}`,
-    `costs: cache TTL ${c.cache.ttl}${c.cache.ttl === 'auto' ? ` (${S.subscription ? '1h, subscription' : '5m until a subscription or a 1h write is seen'})` : ''}; output per request by effort ${EFFORTS.map(e => `${e} ${S.outputs[e] ? `${S.outputs[e]!.avg} tokens seen` : `ratio ${c.cost.ratios[e]}`}`).join(', ')}`,
+    `costs: cache TTL ${c.cache.ttl}${c.cache.ttl === 'auto' ? ` (${S.subscription ? '1h, subscription' : '5m until a subscription or a 1h write is seen'})` : ''}; output per request ${EFFORTS.filter(e => (S.outputs[e]?.length ?? 0) > 0).map(e => `${e} ${median(S.outputs[e]!)} tokens (${S.outputs[e]!.length} seen)`).join(', ') || 'not seen yet'}; effort changes are not costed as a cache rebuild`,
     `Jev context: recent excerpts ${c.awareness.enabled ? 'on' : 'off'} (${c.awareness.messages} messages, ${c.awareness.maxChars} chars)`,
     last,
     ...(S.lastStep ? [cacheText(S.lastStep)] : []),
-    'commands: /jev-model on | dry-run | off | cache | fallback <session|haiku|sonnet|opus> | settings | set | unset | defaults | probe | reset | models',
+    'commands: /jev-model on | dry-run | off (model routing) | skills on | off | cache | fallback <session|haiku|sonnet|opus> | settings | set | unset | defaults | probe | reset | models',
   ].join('\n')
 }
 
@@ -797,7 +820,7 @@ function cacheText(step: Record<string, unknown>) {
   const observed = step.observed_usage as UsageLike | undefined
   const recommendation = step.final_recommended as { model?: string; effort?: string | number } | undefined
   const jev = step.jev_recommended as { how?: string; usd?: number } | undefined
-  const estimate = advice?.estimate ?? advice?.effortEstimate
+  const estimate = advice?.estimate
   const cost = estimate ? `estimated switch premium ${estimate.switchingPremium.toFixed(6)} API-equivalent USD, breakeven ${estimate.breakevenTurns ?? 'never in this scenario'} future turns` : 'estimated switch cost/breakeven unknown'
   return `final ${recommendation?.model ?? '?'}/${recommendation?.effort ?? '-'} · ${jev?.how ?? 'no decision'}${jev?.usd !== undefined ? ` ~$${jev.usd}` : ''} · cache ${advice?.evidence.status ?? 'unknown'} [${advice?.reason ?? 'unavailable'}/${advice?.effortReason ?? 'unavailable'}] · observed read/write ${observed?.cache_read_input_tokens ?? 'unknown'}/${observed?.cache_creation_input_tokens ?? 'unknown'} tokens · ${cost}${feasibleText(step)}`
 }
@@ -815,8 +838,8 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'jev-index', description: 'Show the skills the Jev router can pick from' })
     await $.command.register({
       name: 'jev-model',
-      description: 'Jev model routing: status, on, dry-run, off, cache, fallback, settings, set, unset, defaults, probe, reset, models',
-      argumentHint: 'status | on | dry-run | off | cache | fallback <model> | settings | set <name> <value> | unset <name> | defaults | probe | reset | models',
+      description: 'Jev routing: status, model on/dry-run/off, skills on/off, cache, fallback, settings, set, unset, defaults, probe, reset, models',
+      argumentHint: 'status | on | dry-run | off | skills on|off | cache | fallback <model> | settings | set <name> <value> | unset <name> | defaults | probe | reset | models',
     })
     if (config.resetRequested) {
       try {
@@ -835,6 +858,7 @@ export const register: Register = (on, options) => {
       enabled: config.enabled,
       has_key: config.key.length > 0,
       mode: config.mode,
+      skill_routing: config.skillRouting,
       routing: config.routing,
       gate_threshold: config.gateThreshold,
       fits_threshold: config.fitsThreshold,
@@ -907,7 +931,8 @@ export const register: Register = (on, options) => {
     if (!S.hiddenLoaded) await loadHidden($)
     const started = await $.clock.now()
     const deadline = started + config.timeoutMs
-    const skills = (await ensureIndex($)).skills
+    // Skill selection off: no index is built and no skill is asked about.
+    const skills = config.skillRouting ? (await ensureIndex($)).skills : []
     if (S.available.source === 'not-read') await refreshModels($)
     if (!S.version) await loadCaps($)
     const sent = scrubText(text, [config.key]).slice(0, config.maxPromptChars)
@@ -943,11 +968,13 @@ export const register: Register = (on, options) => {
 
     // Jev judged each tier and effort; the cheapest feasible pair runs.
     const evidence = cacheEvidence(S.cache, await $.clock.now(), cacheNow())
+    if (!config.skillRouting && result.reason === 'empty-index') result.reason = 'skill-routing-off'
+
     const decision = decide(id, result.feasible, families, (family: Family, effort: Effort) => {
       const known = S.caps?.families[family]
       const model = known?.id ?? (family === familyOf(current?.model) ? current?.model : undefined)
-      return pairCost(model, known?.effort, effort, current, evidence, S.outputs, config.cost)
-    }, config.feasibleThreshold)
+      return pairCost(model, effort, current, evidence, S.outputs, costNow())
+    }, config.feasibleThreshold, config.cost.tolerance)
     // A prompt typed during a turn joins that turn: its decision stands.
     if (!midTurn && config.routing !== 'off') {
       S.nextDecision = decision
@@ -982,6 +1009,7 @@ export const register: Register = (on, options) => {
       mid_turn: midTurn,
       sent_chars: sent.length,
       index_size: skills.length,
+      skill_routing: config.skillRouting,
       mode: config.mode,
       outcome: result.outcome,
       reason: result.reason,
@@ -993,7 +1021,7 @@ export const register: Register = (on, options) => {
       delivery,
       model_routing: config.routing,
       jev_feasible: result.feasible,
-      cost_basis: config.routing !== 'off' ? { context_tokens: evidence.contextTokens ?? null, cache: evidence.status, ttl: evidence.ttlSource, horizon: config.cost.horizon, outputs: S.outputs } : undefined,
+      cost_basis: config.routing !== 'off' ? { context_tokens: evidence.contextTokens ?? null, cache: evidence.status, ttl: evidence.ttlSource, horizon: horizonNow().horizon, horizon_source: horizonNow().source, tolerance: config.cost.tolerance, outputs: outputSummary(S.outputs) } : undefined,
       candidates: decision.candidates?.map(c => ({ pair: `${c.family}/${c.effort}`, ...c, family: undefined, effort: undefined })),
       awareness: { source: recent.source, messages: recent.messages, chars: recent.text.length, truncated: recent.truncated },
       decision: {
@@ -1249,6 +1277,16 @@ export const register: Register = (on, options) => {
     if ((e as { agentId?: string }).agentId !== undefined) return next(e)
     S.lastAttempt = S.attempts.get(e.turnId) ?? S.lastAttempt
     if (S.mainTurn === e.turnId) S.mainTurn = undefined
+    const requests = S.stepCounts.get(e.turnId)
+    S.stepCounts.delete(e.turnId)
+    if (requests) {
+      S.turnLengths = [...S.turnLengths, requests].slice(-KEPT_TURN_LENGTHS)
+      try {
+        await $.store.set(TURNLEN_KEY, S.turnLengths)
+      } catch {
+        // Kept for this session only.
+      }
+    }
     await readContext($)
     await finishRound($, 'turn-complete')
 
@@ -1261,11 +1299,13 @@ export const register: Register = (on, options) => {
     const sent = step?.sent_model ? String(step.sent_model) : answered
     const effort = step?.sent_effort !== undefined ? `/${String(step.sent_effort)}` : ''
     const fellBack = ((step?.reasons as string[] | undefined) ?? []).find(x => x.startsWith('model:fallback-'))
-    const cost = decision.usd !== undefined ? ` ~$${decision.usd.toFixed(3)}/${config.cost.horizon} requests` : ', cost unknown'
+    const cost = decision.usd !== undefined ? ` ~$${decision.usd.toFixed(3)}/${horizonNow().horizon} requests` : ', cost unknown'
     const jev = decision.family
       ? decision.how === 'none-feasible-most-capable'
         ? `no pair judged feasible, most able ${decision.family}/${decision.effort}${cost}`
-        : `cheapest feasible ${decision.family}/${decision.effort}${cost}`
+        : decision.how === 'most-feasible-within-tolerance'
+          ? `most feasible within ${Math.round(config.cost.tolerance * 100)}% of the cheapest: ${decision.family}/${decision.effort}${cost}`
+          : `cheapest feasible ${decision.family}/${decision.effort}${cost}`
       : fellBack
         ? `fallback ${fellBack.slice('model:fallback-'.length)}`
         : `no Jev answer (${decision.modelReason ?? 'none'}), session model kept`
@@ -1287,6 +1327,17 @@ export const register: Register = (on, options) => {
     if (unsetMatch) return { text: await unsetHidden($, (unsetMatch[1] ?? '').toLowerCase()) }
     const arg = rawArgs.toLowerCase()
     if (arg === 'cache') return { text: Object.keys(SHARED).filter(k => k.startsWith('cache_') || k.startsWith('cost_') || k.startsWith('effort_output_')).map(k => `${k} = ${String(settingValue(S.options, k, S.hidden))}`).join('\n') }
+    if (arg === 'skills') return { text: `jev-router: skill selection is ${config.skillRouting ? 'on' : 'off'}. Change it with /jev-model skills on|off.` }
+    const skillsSwitch = /^skills?\s+(on|off)$/.exec(arg)
+    if (skillsSwitch) {
+      const enable = skillsSwitch[1] === 'on'
+      const saved = await setOption($, 'skill_routing', enable)
+      if (saved.includes('is now')) {
+        config.skillRouting = enable
+        S.options = { ...S.options, skill_routing: enable }
+      }
+      return { text: saved.includes('is now') ? `jev-router: skill selection is now ${enable ? 'on' : 'off'} (saved to settings; the plugin reloads).` : saved }
+    }
     if (arg === 'on' || arg === 'off' || arg === 'dry-run') {
       const note =
         arg === 'on' && !Object.values(S.caps?.families ?? {}).some(f => f?.ok)

@@ -32,6 +32,12 @@
       "description": "Turn on to restore every setting below. The API key is kept. The switch turns itself off.\nDefault: off",
       "default": false
     },
+    "skill_routing": {
+      "type": "boolean",
+      "title": "Skill · Skill selection",
+      "description": "Suggest local skills for each prompt. Off: no skill is suggested and the skill index is not built; model routing (its own setting below) is unaffected. The Router enabled switch above stops both.\nDefault: on",
+      "default": true
+    },
     "mode": {
       "type": "string",
       "title": "Skill · Load mode",
@@ -84,7 +90,7 @@
     "feasibility_threshold": {
       "type": "number",
       "title": "Model · Feasibility threshold",
-      "description": "Jev judges each tier at each effort; a pair counts as able to do the work when Jev judges it at least this likely to complete it. The cheapest able pair runs (cache rebuild and output included).\nDefault: 0.6",
+      "description": "Jev judges each tier at each effort; a pair counts as able to do the work when Jev judges it at least this likely to complete it. The cheapest able pair runs (cache rebuild on a model switch and output included); pairs costing within a few percent of it compete on feasibility.\nDefault: 0.6",
       "min": 0,
       "max": 1,
       "default": 0.6

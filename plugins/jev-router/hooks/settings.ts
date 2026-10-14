@@ -18,9 +18,6 @@ export type Spec = {
   what: string
 }
 
-// Output per request relative to low effort: assumptions, replaced by what
-// requests at each effort are seen producing.
-const OUTPUT_RATIO: Record<Effort, number> = { low: 1, medium: 2, high: 4, xhigh: 8, max: 16 }
 
 export const SHARED: Record<string, Spec> = {
   // On the settings page.
@@ -35,8 +32,8 @@ export const SHARED: Record<string, Spec> = {
   cache_min_tokens: { where: 'store', kind: 'number', default: 20000, min: 0, max: 10000000, integer: true, what: 'Context size from which a well-read cache is labelled hot in the logs' },
   cache_min_hit_ratio: { where: 'store', kind: 'number', default: 0.8, min: 0, max: 1, what: 'Share of input read from cache from which the cache is labelled hot' },
   cache_ttl: { where: 'store', kind: 'choice', default: 'auto', options: ['auto', '5m', '1h'], what: 'Cache lifetime assumed in costs (auto: what responses show, else 1h on a subscription, else 5m); changes no request' },
-  cost_horizon: { where: 'store', kind: 'number', default: 5, min: 1, max: 100, integer: true, what: 'Requests each tier and effort is costed over: the first (a cache rebuild on a switch) plus the later ones' },
-  ...Object.fromEntries(EFFORTS.map(e => [`effort_output_${e}`, { where: 'store', kind: 'number', default: OUTPUT_RATIO[e], min: 0.01, max: 100, what: `Relative output per request at ${e} effort, until output at that effort is seen` } satisfies Spec])),
+  cost_horizon: { where: 'store', kind: 'number', default: 0, min: 0, max: 100, integer: true, what: 'Requests each pair is costed over: the first (a cache rebuild on a model switch) plus the later ones. 0: the median requests per turn of recent turns (5 until three turns are seen)' },
+  cost_tolerance: { where: 'store', kind: 'number', default: 0.03, min: 0, max: 0.5, what: 'Feasible pairs costing within this share of the cheapest compete on feasibility: the likeliest runs. 0: the cheapest always runs' },
   auto_probe: { where: 'store', kind: 'boolean', default: true, what: 'Probe models automatically: on first use (no learned ids on this Claude Code) and after a routed request fails' },
   jev_context_chars: { where: 'store', kind: 'number', default: 2000, min: 0, max: 8000, integer: true, what: 'Most characters of recent conversation sent to Jev; 0 sends none' },
   jev_context_messages: { where: 'store', kind: 'number', default: 6, min: 1, max: 12, integer: true, what: 'Most recent user/assistant messages those excerpts come from' },
@@ -77,11 +74,11 @@ export const sharedConfig = (page: Record<string, unknown>, store: Record<string
       minTokens: v('cache_min_tokens'),
       minHitRatio: v('cache_min_hit_ratio'),
       ttl: v('cache_ttl'),
-      breakevenTurns: v('cost_horizon'),
+      breakevenTurns: Number(v('cost_horizon')) || 5,
     } as CacheConfig,
     cost: {
       horizon: v('cost_horizon'),
-      ratios: Object.fromEntries(EFFORTS.map(e => [e, v(`effort_output_${e}`)])) as Record<Effort, number>,
+      tolerance: v('cost_tolerance'),
     } as CostConfig,
     awareness: {
       enabled: v('jev_context_enabled'),

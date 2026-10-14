@@ -7,7 +7,7 @@ import { sharedConfig } from './settings'
 import { rankWideBody, route } from './router'
 import { FAKE_KEY, logLines, memoryStore, rankWide, rerank, world, type World } from './testkit'
 import { learn, noteContext, type Caps } from './model'
-import { learnOutput, outputEstimate, pairCost } from './cost'
+import { horizonFor, learnOutput, normalizeStats, outputEstimate, outputSummary, pairCost } from './cost'
 
 const SONNET = 'claude-sonnet-4-6'
 const OPUS = 'claude-opus-4-6'
@@ -84,48 +84,67 @@ describe('context capacity facts for Jev', () => {
 
 const H55 = 'claude-haiku-5-5', S55 = 'claude-sonnet-5-5', O55 = 'claude-opus-5-5'
 const caps55: Caps = { version: '9.9.9', families: { haiku: { id: H55, ok: true, effort: true, at: '' }, sonnet: { id: S55, ok: true, effort: true, at: '' }, opus: { id: O55, ok: true, effort: true, at: '' } }, retryOk: true }
-const cost5 = { horizon: 5, ratios: { low: 1, medium: 2, high: 4, xhigh: 8, max: 16 } }
+const cost5 = { horizon: 5 }
 // 865k tokens of conversation, first seen after a reload: cache state unknown.
 const reloaded = (subscription = false) => cacheEvidence(withContext({}, 865000), 0, { ...config.cache, subscription })
 const onOpusHigh = { model: O55, effort: 'high' }
-const seenHigh = { high: { avg: 2000, n: 3 } }
+// Ten requests at high effort, 2000 output tokens each: high has its own median; every other effort shares it.
+const seenHigh = { high: Array<number>(10).fill(2000) }
 
 describe('pair costs', () => {
   test('a conversation first seen mid-way (a plugin reload) has an unknown cache, not a cold one', () => {
     expect(reloaded().status).toBe('unknown')
     expect(cacheEvidence(withContext({}, undefined), 0, config.cache).status).toBe('cold')
   })
-  test('staying reads the cache back; a switch or an effort change rebuilds it; output scales with effort', () => {
-    // Staying: 5 cached reads of 865k on Opus 5.5, plus 5 x 2000 output tokens.
-    expect(pairCost(O55, true, 'high', onOpusHigh, reloaded(), seenHigh, cost5)).toEqual({ usd: 1.065, context_usd: 0.865, output_usd: 0.2, output_tokens: 2000, stays: true, rank: 20 })
-    // Same model, other effort: the cache is rebuilt, and medium is half of high's output.
-    expect(pairCost(O55, true, 'medium', onOpusHigh, reloaded(), seenHigh, cost5)).toEqual({ usd: 5.117, context_usd: 5.017, output_usd: 0.1, output_tokens: 1000, stays: false, rank: 20 })
-    // Haiku 5.5 above 100k is priced at its long-context rate.
-    expect(pairCost(H55, true, 'low', onOpusHigh, reloaded(), seenHigh, cost5).usd).toBe(0.719875)
-    expect(pairCost(S55, true, 'high', onOpusHigh, reloaded(), seenHigh, cost5).usd).toBe(2.6085)
+  test('staying reads the cache back, a model switch rebuilds it, and an effort change does not', () => {
+    // Staying: 5 cached reads of 865k on Opus 5.5, plus 5 x 2000 output tokens at the effort's own median.
+    expect(pairCost(O55, 'high', onOpusHigh, reloaded(), seenHigh, cost5)).toEqual({ usd: 1.065, context_usd: 0.865, output_usd: 0.2, output_tokens: 2000, output_basis: 'own', stays: true, rank: 20 })
+    // Same model, other effort: the cache is kept and the pooled median stands in, so the cost is the same.
+    expect(pairCost(O55, 'low', onOpusHigh, reloaded(), seenHigh, cost5)).toEqual({ usd: 1.065, context_usd: 0.865, output_usd: 0.2, output_tokens: 2000, output_basis: 'pooled', stays: true, rank: 20 })
+    // Another model: its whole context is written once. Haiku 5.5 above 100k is priced at its long-context rate.
+    expect(pairCost(H55, 'low', onOpusHigh, reloaded(), seenHigh, cost5)).toMatchObject({ stays: false, context_usd: 0.713625, output_usd: 0.025, usd: 0.738625 })
+    expect(pairCost(S55, 'high', onOpusHigh, reloaded(), seenHigh, cost5).usd).toBe(2.6085)
   })
-  test('on a subscription the cache lasts an hour, and its rebuild is written at the hour rate', () => {
+  test('on a subscription the cache lasts an hour, and a rebuild is written at the hour rate', () => {
     expect(reloaded(true).ttlSource).toBe('subscription-1h')
-    expect(pairCost(O55, true, 'medium', onOpusHigh, reloaded(true), {}, cost5).context_usd).toBe(7.612)
+    expect(pairCost(H55, 'low', onOpusHigh, reloaded(true), {}, cost5).context_usd).toBe(1.038)
+    expect(pairCost(O55, 'medium', onOpusHigh, reloaded(true), {}, cost5).context_usd).toBe(0.865)
   })
-  test('unknowns stay unknown: no id, no price, no context, no output seen', () => {
-    expect(pairCost(undefined, true, 'low', onOpusHigh, reloaded(), seenHigh, cost5)).toEqual({ stays: false })
-    expect(pairCost('claude-opus-future', true, 'low', onOpusHigh, reloaded(), seenHigh, cost5).usd).toBeUndefined()
-    expect(pairCost(O55, true, 'low', onOpusHigh, cacheEvidence({}, 0, config.cache), seenHigh, cost5).usd).toBeUndefined()
-    const noOutput = pairCost(O55, true, 'high', onOpusHigh, reloaded(), {}, cost5)
-    expect([noOutput.usd, noOutput.output_usd]).toEqual([0.865, undefined])
+  test('unknowns stay unknown: no id, no price, no context, too little output', () => {
+    expect(pairCost(undefined, 'low', onOpusHigh, reloaded(), seenHigh, cost5)).toEqual({ stays: false, output_basis: 'none' })
+    expect(pairCost('claude-opus-future', 'low', onOpusHigh, reloaded(), seenHigh, cost5).usd).toBeUndefined()
+    expect(pairCost(O55, 'low', onOpusHigh, cacheEvidence({}, 0, config.cache), seenHigh, cost5).usd).toBeUndefined()
+    const noOutput = pairCost(O55, 'high', onOpusHigh, reloaded(), {}, cost5)
+    expect([noOutput.usd, noOutput.output_usd, noOutput.output_basis]).toEqual([0.865, undefined, 'none'])
   })
-  test('with the current effort unknown, or a model that takes none, effort is no cache change', () => {
-    expect(pairCost(O55, true, 'low', { model: O55 }, reloaded(), {}, cost5).stays).toBe(true)
-    expect(pairCost(O55, false, 'low', onOpusHigh, reloaded(), {}, cost5).stays).toBe(true)
+  test('output samples are kept, the median resists outliers, and an effort needs enough samples of its own', () => {
+    let stats = learnOutput({}, 'high', 100)!
+    expect(learnOutput(stats, 'turbo', 100)).toBeUndefined()
+    expect(learnOutput(stats, 'high', -1)).toBeUndefined()
+    expect(learnOutput(stats, 'max', 300)).toEqual({ high: [100], max: [300] })
+    // Fewer than three samples overall: no output is assumed.
+    expect(outputEstimate(stats, 'high')).toEqual({ basis: 'none' })
+    for (const n of [120, 8000]) stats = learnOutput(stats, 'high', n)!
+    // Three samples: the pooled median, whatever the effort, and the outlier does not drag it.
+    expect(outputEstimate(stats, 'low')).toEqual({ tokens: 120, basis: 'pooled' })
+    for (let i = 0; i < 7; i++) stats = learnOutput(stats, 'high', 110)!
+    // Ten at high: high has its own median; low still shares the pooled one.
+    expect(outputEstimate(stats, 'high')).toEqual({ tokens: 110, basis: 'own' })
+    expect(outputEstimate(stats, 'low').basis).toBe('pooled')
+    // Only the latest 40 are kept.
+    for (let i = 0; i < 60; i++) stats = learnOutput(stats, 'high', i)!
+    expect(stats.high).toHaveLength(40)
+    expect(outputSummary({ high: [1, 3, 2] })).toEqual({ high: { n: 3, median: 2 } })
   })
-  test('output per effort is learned as a moving average, and an unseen level is scaled from the nearest', () => {
-    const once = learnOutput({}, 'high', 1000)!
-    expect(learnOutput(once, 'high', 2000)).toEqual({ high: { avg: 1300, n: 2 } })
-    expect(learnOutput(once, 'turbo', 2000)).toBeUndefined()
-    expect(learnOutput(once, 'max', 2000)).toEqual({ high: { avg: 1000, n: 1 }, max: { avg: 2000, n: 1 } })
-    expect(outputEstimate({ low: { avg: 300, n: 1 }, high: { avg: 2000, n: 1 } }, 'medium', cost5.ratios)).toBe(600)
-    expect(outputEstimate({}, 'medium', cost5.ratios)).toBeUndefined()
+  test('what $.store holds is read as samples; an older shape is dropped', () => {
+    expect(normalizeStats({ high: [1, 'x', 3], medium: { avg: 100, n: 1 }, low: 'no' })).toEqual({ high: [1, 3] })
+    expect(normalizeStats(undefined)).toEqual({})
+  })
+  test('requests per turn: the setting, else the median of recent turns once three are seen, else 5', () => {
+    expect(horizonFor(8, [2, 2, 2])).toEqual({ horizon: 8, source: 'setting' })
+    expect(horizonFor(0, [2, 30])).toEqual({ horizon: 5, source: 'default' })
+    expect(horizonFor(0, [3, 52, 5, 9])).toEqual({ horizon: 7, source: 'learned' })
+    expect(horizonFor(0, [500, 500, 500]).horizon).toBe(100)
   })
 })
 
@@ -202,12 +221,12 @@ describe('awareness engine integration', () => {
     const w = world(on, answer({ 'haiku::low': 0.7, 'sonnet::high': 0.9, 'opus::high': 0.9 })), sent = bottom(on, w)
     w.contextTokens = 865000
     await begin($, 'a'); await step($, 'a'); await step($, 'a', 1)
-    // The session model (opus) stands in for the current one; its effort is
-    // unknown, so any opus effort keeps its cache.
+    // The session model (opus) stands in for the current one; an effort change
+    // keeps its cache, so all three opus efforts cost the same context.
     expect(sent.map(s => `${s.model}/${s.effort}`)).toEqual([`${O55}/high`, `${O55}/high`])
     const round = logLines(w).find(l => l.type === 'round')!
     expect(round.decision).toEqual({ family: 'opus', effort: 'high', how: 'cheapest-feasible', usd: 0.865, threshold: 0.6 })
-    expect(round.cost_basis).toEqual({ context_tokens: 865000, cache: 'unknown', ttl: 'subscription-1h', horizon: 5, outputs: {} })
+    expect(round.cost_basis).toEqual({ context_tokens: 865000, cache: 'unknown', ttl: 'subscription-1h', horizon: 5, horizon_source: 'default', tolerance: 0.03, outputs: {} })
     expect(round.candidates.slice(0, 2).map((c: any) => [c.pair, c.usd])).toEqual([['opus/low', 0.865], ['opus/medium', 0.865]])
     expect(round.candidates.find((c: any) => c.pair === 'haiku/low').usd).toBe(1.038)
     expect(w.fetches.length).toBe(2)
@@ -216,11 +235,46 @@ describe('awareness engine integration', () => {
     mock.clock(on); const saved = memoryStore(on, { caps })
     const w = world(on, answer({ 'sonnet::medium': 0.9 })); bottom(on, w)
     await begin($, 'a'); await step($, 'a')
-    expect(saved.outputs).toEqual({ medium: { avg: 100, n: 1 } })
+    expect(saved.outputs).toEqual({ medium: [100] })
     await begin($, 'b')
-    const round = logLines(w).filter(l => l.type === 'round').at(-1)!
-    expect(round.cost_basis.outputs).toEqual({ medium: { avg: 100, n: 1 } })
-    expect(round.candidates.find((c: any) => c.pair === 'opus/high').output_tokens).toBe(200)
+    let round = logLines(w).filter(l => l.type === 'round').at(-1)!
+    expect(round.cost_basis.outputs).toEqual({ medium: { n: 1, median: 100 } })
+    // One sample is too few to assume anything: no output is costed yet.
+    expect(round.candidates.find((c: any) => c.pair === 'opus/high').output_basis).toBe('none')
+    // Three samples: the pooled median stands for every effort.
+    await step($, 'b', 0); await step($, 'b', 1)
+    await begin($, 'c')
+    round = logLines(w).filter(l => l.type === 'round').at(-1)!
+    expect(round.candidates.find((c: any) => c.pair === 'opus/high')).toMatchObject({ output_tokens: 100, output_basis: 'pooled' })
+  })
+  test('the cost horizon follows the requests per turn of recent turns, kept across sessions', { options }, async ($, on) => {
+    mock.clock(on); const saved = memoryStore(on, { caps })
+    const w = world(on, answer({ 'sonnet::medium': 0.9 })); bottom(on, w)
+    on('turn.complete', () => ({ text: '' } as never))
+    for (const id of ['a', 'b', 'c']) {
+      await begin($, id); await step($, id, 0); await step($, id, 1)
+      await $.turn.complete({ turnId: id, answer: 'OK', durationMs: 1, isAborted: false, usage: usage(SONNET) } as never)
+    }
+    expect(saved.turnlen).toEqual([2, 2, 2])
+    await begin($, 'd')
+    expect(logLines(w).filter(l => l.type === 'round').at(-1)?.cost_basis).toMatchObject({ horizon: 2, horizon_source: 'learned' })
+  })
+  test('Feasible pairs costing within the tolerance of the cheapest compete on feasibility: effort follows Jev, not the cheapest', { options }, async ($, on) => {
+    mock.clock(on); mock.store(on, { caps: caps55 })
+    const w = world(on, answer({ 'opus::low': 0.65, 'opus::high': 0.9 })), sent = bottom(on, w)
+    w.contextTokens = 865000
+    await begin($, 'a'); await step($, 'a')
+    // low and high cost the same (the cache is kept); high is likelier to do the work.
+    expect(sent[0]).toEqual({ model: O55, effort: 'high' })
+    expect(logLines(w).find(l => l.type === 'round')?.decision).toMatchObject({ family: 'opus', effort: 'high', how: 'most-feasible-within-tolerance' })
+  })
+  test('with tolerance 0 the cheapest feasible pair runs', { options }, async ($, on) => {
+    mock.clock(on); mock.store(on, { caps: caps55, advanced: { cost_tolerance: 0 } })
+    const w = world(on, answer({ 'opus::low': 0.65, 'opus::high': 0.9 })), sent = bottom(on, w)
+    w.contextTokens = 865000
+    await begin($, 'a'); await step($, 'a')
+    expect(sent[0]).toEqual({ model: O55, effort: 'low' })
+    expect(logLines(w).find(l => l.type === 'round')?.decision.how).toBe('cheapest-feasible')
   })
   test('tool failure evidence is aggregate and not a claim of an incorrect answer; subagent failures are ignored', { options }, async ($, on) => {
     mock.clock(on); mock.store(on, { caps })

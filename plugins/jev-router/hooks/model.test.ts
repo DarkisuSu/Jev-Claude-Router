@@ -47,7 +47,8 @@ const step = async ($: Engine, turnId: string, index: number, extra: Record<stri
 // unable (0.1).
 const answers = (feasible: Record<string, number> = {}) =>
   (q: Record<string, unknown>) =>
-    'acts_on_user_system' in q
+    // Request 1 carries the skill gates and/or the model questions; Jev answers what is asked.
+    'acts_on_user_system' in q || Object.keys(q).some(k => k.startsWith('feasible::'))
       ? { status: 200, body: rankWide(0.9, 'speckit-specify', feasible, q) }
       : { status: 200, body: rerank(q, { 'speckit-specify': 0.2 }) }
 
@@ -431,6 +432,82 @@ describe('automatic probe', () => {
   })
 })
 
+describe('skill selection switch', () => {
+  const wideQuestions = (w: World) => JSON.parse(w.fetches[0]?.body ?? '{}').questions as Record<string, unknown>
+
+  test('on by default: skills are ranked and gated beside the model questions', { options: ON }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, LEARNED)
+    const w = world(on, answers({ 'opus::high': 0.9 }))
+    bottom(on)
+    await turn($, w)
+    expect(Object.keys(wideQuestions(w))).toEqual(expect.arrayContaining(['which', 'acts_on_user_system', 'feasible::opus::high']))
+    expect(logLines(w).find(l => l.type === 'round')?.skill_routing).toBe(true)
+  })
+
+  test('off: no skill is asked about or suggested, and model routing carries on', { options: { ...ON, skill_routing: false } }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, LEARNED)
+    const w = world(on, answers({ 'opus::high': 0.9 }))
+    const seen = bottom(on)
+
+    await turn($, w)
+    await step($, 't1', 0)
+
+    // One request, with the model questions alone.
+    expect(w.fetches.length).toBe(1)
+    const keys = Object.keys(wideQuestions(w))
+    expect(keys.every(k => k.startsWith('feasible::'))).toBe(true)
+    expect(keys.length).toBe(10)
+    // Nothing is added beside the prompt, and the model still switches.
+    expect(w.seen?.context ?? []).toEqual([])
+    expect(seen[0]).toEqual({ model: OPUS, effort: 'high', agentId: undefined })
+    const round = logLines(w).find(l => l.type === 'round')!
+    expect(round).toMatchObject({ skill_routing: false, outcome: 'no-match', reason: 'skill-routing-off', index_size: 0 })
+    expect(round.decision.family).toBe('opus')
+  })
+
+  test('off with model routing off too: Jev is not called at all', { options: { ...ON, skill_routing: false, model_routing: 'off' } }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, LEARNED)
+    const w = world(on, answers({ 'opus::high': 0.9 }))
+    bottom(on)
+    await turn($, w)
+    expect(w.fetches.length).toBe(0)
+    expect(logLines(w).find(l => l.type === 'round')?.reason).toBe('skill-routing-off')
+  })
+
+  test('/jev-model skills writes the setting and applies at once; the status line shows it', { options: ON }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, LEARNED)
+    const w = world(on, answers({ 'opus::high': 0.9 }))
+    bottom(on)
+
+    expect((await $.command.run({ command: 'jev-model', args: 'skills' })).text).toContain('skill selection is on')
+    const off = await $.command.run({ command: 'jev-model', args: 'skills off' })
+    expect(off.text).toContain('skill selection is now off')
+    expect(w.sets).toEqual([{ key: 'jev-router@inline.skill_routing', value: false }])
+    expect((await $.command.run({ command: 'jev-model', args: '' })).text).toContain('skill selection: off')
+
+    await turn($, w)
+    expect(Object.keys(wideQuestions(w)).every(k => k.startsWith('feasible::'))).toBe(true)
+
+    const back = await $.command.run({ command: 'jev-model', args: 'skills on' })
+    expect(back.text).toContain('skill selection is now on')
+    expect(w.sets.at(-1)).toEqual({ key: 'jev-router@inline.skill_routing', value: true })
+    expect((await $.command.run({ command: 'jev-model', args: '' })).text).toContain('skill selection: on')
+  })
+
+  test('defaults turns skill selection back on', { options: { ...ON, skill_routing: false } }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, LEARNED)
+    const w = world(on, answers())
+    bottom(on)
+    await $.command.run({ command: 'jev-model', args: 'defaults' })
+    expect(w.configRows.find(r => r.key.endsWith('.skill_routing'))?.value).toBe(true)
+  })
+})
+
 describe('settings kept off the page', () => {
   test('set applies at once, unset restores the default, bad values change nothing', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
     mock.clock(on)
@@ -515,6 +592,25 @@ describe('model policy', () => {
     expect(d.candidates?.map(c => `${c.family}/${c.effort}`)).toEqual(['opus/low', 'haiku/high', 'haiku/low'])
     const tie = decide('r', { haiku: { medium: 0.9, low: 0.9 }, sonnet: { low: 0.9 } }, ['haiku', 'sonnet'], () => ({}), 0.6)
     expect([tie.family, tie.effort]).toEqual(['haiku', 'low'])
+  })
+
+  test('pairs costing within the tolerance of the cheapest compete on feasibility; farther ones do not', () => {
+    const feas = { haiku: { low: 0.65 }, sonnet: { low: 0.8 }, opus: { low: 0.95 } }
+    const table = costs({ 'haiku::low': 1.0, 'sonnet::low': 1.02, 'opus::low': 1.1 })
+    const d = decide('r', feas, ['haiku', 'sonnet', 'opus'], table, 0.6, 0.03)
+    expect([d.family, d.how, d.usd]).toEqual(['sonnet', 'most-feasible-within-tolerance', 1.02])
+    // Tolerance 0, or the cheapest already the likeliest: the cheapest runs.
+    expect(decide('r', feas, ['haiku', 'sonnet', 'opus'], table, 0.6, 0).family).toBe('haiku')
+    expect(decide('r', { haiku: { low: 0.9 }, sonnet: { low: 0.8 } }, ['haiku', 'sonnet'], costs({ 'haiku::low': 1.0, 'sonnet::low': 1.01 }), 0.6, 0.03).how).toBe('cheapest-feasible')
+    // Within tolerance and equally likely, or only a hair likelier: the cheaper stays.
+    expect(decide('r', { haiku: { low: 0.8 }, sonnet: { low: 0.8 } }, ['haiku', 'sonnet'], costs({ 'haiku::low': 1.0, 'sonnet::low': 1.01 }), 0.6, 0.03).family).toBe('haiku')
+    expect(decide('r', { haiku: { low: 0.8 }, sonnet: { low: 0.84 } }, ['haiku', 'sonnet'], costs({ 'haiku::low': 1.0, 'sonnet::low': 1.01 }), 0.6, 0.03).family).toBe('haiku')
+    // Each step up must clear the margin from the pair before it: 0.65 to 0.72 is too little, 0.65 to 0.9 is not.
+    expect(decide('r', { haiku: { low: 0.65 }, sonnet: { low: 0.72 }, opus: { low: 0.9 } }, ['haiku', 'sonnet', 'opus'], costs({ 'haiku::low': 1.0, 'sonnet::low': 1.01, 'opus::low': 1.02 }), 0.6, 0.03).family).toBe('opus')
+    // A pair below the threshold never competes, however close its cost.
+    expect(decide('r', { haiku: { low: 0.65 }, sonnet: { low: 0.5 } }, ['haiku', 'sonnet'], costs({ 'haiku::low': 1.0, 'sonnet::low': 1.0 }), 0.6, 0.03).family).toBe('haiku')
+    // Without a known cost there is nothing to compare: the list-price order stands.
+    expect(decide('r', { haiku: { low: 0.65 }, sonnet: { low: 0.99 } }, ['haiku', 'sonnet'], () => ({}), 0.6, 0.03).family).toBe('haiku')
   })
 
   test('with no pair feasible, the most able runs, the cheaper of equals', () => {

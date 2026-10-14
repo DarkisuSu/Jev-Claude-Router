@@ -56,11 +56,11 @@ describe('cache evidence and estimator', () => {
     expect(p.reason).toBe('same-model')
     expect(p.effortReason).toBe('same-effort')
   })
-  test('effort changes estimate rebuild cost without inventing reasoning savings or locking effort', () => {
+  test('an effort change is not assumed to rebuild the cache (two were seen to keep it), nor to lock effort', () => {
     const p = cacheAdvice({ model: OPUS, effort: 'high' }, desired(OPUS, 'medium'), hot(), 100, cfg)
-    expect(p.effortReason).toBe('effort-rebuild-estimated')
-    expect(p.effortEstimate?.breakevenTurns).toBe(null)
-    expect(p.effortEstimate?.savingsPerFutureTurn).toBe(0)
+    expect(p.effortReason).toBe('effort-change-no-rebuild-seen')
+    expect(p.estimate).toBeUndefined()
+    expect('effortEstimate' in p).toBe(false)
     expect('effort' in p).toBe(false)
   })
   test('missing or invalid counters remain unknown without a routing fallback', () => {
@@ -206,7 +206,7 @@ describe('cache routing engine integration', () => {
     choice.score = 2
     await begin($, 'b'); await step($, 'b')
     expect(sent[1]?.effort).toBe('high')
-    expect(last(w)?.cache_advice.effortReason).toBe('effort-rebuild-estimated')
+    expect(last(w)?.cache_advice.effortReason).toBe('effort-change-no-rebuild-seen')
     choice.model = 'opus'
     await begin($, 'c'); await step($, 'c')
     expect(sent[2]?.model).toBe(OPUS)
@@ -353,14 +353,16 @@ describe('settings homes', () => {
     // A value in the wrong home is ignored.
     expect(sharedConfig({ effort_high: 'Page High' }).effortLevels.high).toBe(DEFAULT_EFFORT_LEVELS.high)
     expect(sharedConfig({}, { feasibility_threshold: 0.7 }).feasibleThreshold).toBe(0.6)
-    expect(sharedConfig({ cost_horizon: 9 }).cost.horizon).toBe(5)
+    expect(sharedConfig({ cost_horizon: 9 }).cost.horizon).toBe(0)
+    expect(sharedConfig({}, { cost_horizon: 9, cost_tolerance: 0.1 }).cost).toEqual({ horizon: 9, tolerance: 0.1 })
     expect(sharedConfig({}, { effort_high: '' }).effortLevels.high).toBe(DEFAULT_EFFORT_LEVELS.high)
   })
   test('cache values validate fractions, choices and integers', () => {
     expect(parseSetting('cache_min_hit_ratio', '0.93')).toBe(0.93)
     expect(parseSetting('cost_horizon', '3.1')).toBeUndefined()
     expect(parseSetting('cache_ttl', 'forever')).toBeUndefined()
-    expect(parseSetting('effort_output_high', '0')).toBeUndefined()
+    expect(parseSetting('cost_tolerance', '0.9')).toBeUndefined()
+    expect(parseSetting('cost_horizon', '0')).toBe(0)
     expect(sharedConfig({}, { cache_min_tokens: -1, cache_min_hit_ratio: NaN }).cache).toEqual(cfg)
   })
   test('commands write each setting to its own home; a restart reads them back', { options }, async ($, on) => {

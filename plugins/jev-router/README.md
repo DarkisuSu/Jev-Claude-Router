@@ -16,6 +16,8 @@ Release installation: `/plugin install jev-router --marketplace DarkisuSu/Jev-Cl
 
 **No match, error, timeout or no key:** the prompt goes on with nothing added, so Claude's own skill behaviour stands.
 
+**Switching it off.** `Skill selection` on the settings page (or `/jev-model skills on|off`) is separate from model routing. Off, the skill index is not built, no skill is ranked, gated or suggested, and the request to Jev carries the model questions alone (the round's reason is `skill-routing-off`). With model routing off as well, Jev is not called at all. `Router enabled` stops both.
+
 **Load modes:**
 
 - `hint`: adds a `<skill_relevance>` block. Claude loads the skill natively with the Skill tool if it agrees.
@@ -46,11 +48,12 @@ Tier and effort descriptions are part of each question. They have defaults and c
 ### How the pick is made
 
 1. **Feasible pairs.** Every tier and effort pair Jev judges at least `feasibility_threshold` (0.6) likely to complete the work.
-2. **Cheapest.** The router costs each pair (see [Pair cost](#pair-cost)) and runs the cheapest feasible one. A pair with a known cost sorts before one with an unknown cost; unknown costs sort by the model's list price, then the lower tier, then the lower effort.
-3. **None feasible.** The pair Jev judges most able runs (the cheaper of equals), logged as `model:none-feasible-most-capable`.
-4. **No answer.** When Jev fails or times out, `fallback_model` is used (default `session`, the model you chose with `/model`).
+2. **Cheapest.** The router costs each pair (see [Pair cost](#pair-cost)) and finds the cheapest feasible one. A pair with a known cost sorts before one with an unknown cost; unknown costs sort by the model's list price, then the lower tier, then the lower effort.
+3. **Within tolerance, the likeliest.** Feasible pairs costing within `cost_tolerance` (3%) of the cheapest may replace it, in cost order, by being at least 0.05 likelier in Jev's feasibility than the pair before. A cost difference that small is an estimate, and a clearly likelier pair is worth it; the 0.05 margin keeps hundredths in Jev's answers, or an effort whose cost is not measured yet (it looks as cheap as the rest), from pulling the pick up to a dearer level. With `cost_tolerance` 0 the cheapest always runs; with no known cost there is nothing to compare, and step 2's order stands. The log says `cheapest-feasible` or `most-feasible-within-tolerance`.
+4. **None feasible.** The pair Jev judges most able runs (the cheaper of equals), logged as `model:none-feasible-most-capable`.
+5. **No answer.** When Jev fails or times out, `fallback_model` is used (default `session`, the model you chose with `/model`).
 
-So the threshold defines "able enough", and cost decides among the able. A switch can win (a cheaper tier that Jev judges able) or staying can win (a big warm cache that a switch would rebuild); the numbers decide, not a rule. A `/model` choice is never pinned: every turn is judged, and the `/model` choice is the session model the `session` fallback uses.
+So the threshold defines "able enough", and cost (then feasibility, within the tolerance) decides among the able. A switch can win (a cheaper tier that Jev judges able) or staying can win (a big warm cache that a switch would rebuild); the numbers decide, not a rule. A `/model` choice is never pinned: every turn is judged, and the `/model` choice is the session model the `session` fallback uses.
 
 ### When a step is rewritten
 
@@ -71,17 +74,18 @@ Only when all of these hold. Otherwise the step goes as the engine resolved it, 
 
 ### Pair cost
 
-Each tier at each effort is costed over `cost_horizon` (5) main requests, in API-equivalent USD at list prices. Let `N` be the last-known context, `R` the estimated reusable tokens, `H` the horizon and `O` the expected output tokens per request at that effort:
+Each tier at each effort is costed over `H` main requests (see below), in API-equivalent USD at list prices. Let `N` be the last-known context, `R` the estimated reusable tokens, `H` the horizon and `O` the expected output tokens per request at that effort:
 
 ```
 context, staying  = (R × read + (N − R) × write) / 1e6   warm cache; a cached read of N when its state is unknown
-context, rebuild  = N × write / 1e6                      a switch, an effort change, or a cold or expired cache
+context, rebuild  = N × write / 1e6                      a switch of model, or a cold or expired cache
 pair cost         = first request's context + (H − 1) × N × read / 1e6 + H × O × output price / 1e6
 ```
 
-- **Staying** means the same model at the same effort as the last request. Changing effort rebuilds the cache as a switch does (the Prompt caching docs list an effort change as invalidating the cached prefix). With the current effort unknown (no response seen yet), or a model that takes no effort, effort is not counted as a change.
+- **Staying** means the same model as the last request, whatever the effort. An effort change is **not** costed as a cache rebuild: in the logs, two effort changes in a row (high to medium to high) left `cache_read` growing with nothing rewritten, while a model switch wrote the whole context again (a switch from Opus to Sonnet wrote 388,522 tokens). This is evidence from one session, not a documented guarantee; if effort changes are found to rebuild the cache, it will show as writes after a change.
 - **Write price** follows the cache lifetime: 1.25× input for 5 minutes, 2× for an hour.
-- **Output** (thinking included) is what main requests at that effort were seen producing: a moving average per effort, kept across sessions in `$.store` under `outputs` (numbers only). An effort not seen yet is scaled from the nearest one seen by `effort_output_<level>` (1 / 2 / 4 / 8 / 16, assumptions). Before any output is seen, output is left out of every pair alike.
+- **Output** (thinking included) is the median of the output tokens of recent main requests (the latest 40 per effort, numbers only, kept across sessions in `$.store` under `outputs`). The median is used because a few very long answers would drag a mean. An effort uses its own median once it has 10 samples; until then every effort shares the median over all efforts, so effort does not change the cost (no ratio between efforts is assumed), and with fewer than 3 samples in all, output is left out of every pair alike. In the logs most requests are short tool-call steps, so the output cost is small beside the context cost.
+- **Horizon `H`**: `cost_horizon`, or with 0 (default) the median number of main requests per turn over the last turns (kept across sessions under `turnlen`; 5 until three turns have been seen). The decision binds to the whole turn, so the turn's requests are what a switch pays back over.
 - **Current model**: the model that answered last; before any response was seen (a new session or a plugin reload), the session model mapped to its learned id.
 
 Unknowns stay unknown: a pair whose model has no price, or a conversation whose size is unknown, has no cost and sorts after the costed ones.
@@ -106,7 +110,7 @@ Conversation cache facts, actual-answer tracking and final plans stay in session
 
 This is a relative **API-equivalent resource proxy**, not measured subscription quota, a Claude bill, or a promise of savings. The router never adds an Anthropic key, changes credentials, rewrites requests beyond `model` and `effort`, or calls paid Anthropic APIs.
 
-The step log also keeps the older switching estimate (`cache_advice`: premium and break-even against the last observed request) for reference; it does not affect the pick.
+The step log also keeps the older switching estimate for a model change (`cache_advice`: premium and break-even against the last observed request) for reference; it does not affect the pick.
 
 ## Facts Jev judges with
 
@@ -139,7 +143,7 @@ With `jev_context_enabled` on (default), Jev gets up to `jev_context_chars` (200
 
 **Automatic probe.** With `auto_probe` on (default), the router probes without being asked: when a turn starts and a listed family's id or effort support is not known on this Claude Code (first use, or after an update), and when a routed request to a family fails (its id may have changed). Each family is probed at most once per load, with one tiny background subagent; a toast says so. The resend check is never armed automatically, since it sends a request meant to fail. A probe subagent's reply ("OK") would enter the conversation as another session's message and start a turn of its own, so it is dropped with one line, `jev-router: model probe finished`. Model routing `off` probes nothing.
 
-**Effort levels.** The five levels Claude Code names (`low`, `medium`, `high`, `xhigh`, `max`) are fixed in `model.ts`, and Jev judges every routable tier at every one. Claude Code silently lowers a level a model does not take, and a mod cannot learn which a model takes: a probe on Claude Code 2.1.296 showed that a subagent's step carries the level asked whatever the model, and that no classic event reports the level applied for a subagent `$.agent.spawn` started. So a pair Jev judges at `xhigh` or `max` may actually run one level lower, and it is costed at the level asked. Because the cheapest able pair runs, a higher level is chosen only when no cheaper pair is judged able.
+**Effort levels.** The five levels Claude Code names (`low`, `medium`, `high`, `xhigh`, `max`) are fixed in `model.ts`, and Jev judges every routable tier at every one. Claude Code silently lowers a level a model does not take, and a mod cannot learn which a model takes: a probe on Claude Code 2.1.296 showed that a subagent's step carries the level asked whatever the model, and that no classic event reports the level applied for a subagent `$.agent.spawn` started. So a pair Jev judges at `xhigh` or `max` may actually run one level lower, and it is costed at the level asked. Because the cheapest able pair runs, a higher level is chosen only when no cheaper pair is judged able, or when it is clearly likelier (by 0.05 or more) among pairs of nearly the same cost.
 
 ## Settings
 
@@ -151,6 +155,7 @@ The settings page holds the settings people change:
 | Router enabled | on |
 | Write log | off |
 | Reset all settings to defaults | off |
+| Skill selection | on |
 | Load mode | hint |
 | Gate threshold | 0.3 |
 | Fits threshold | 0.3 |
@@ -168,8 +173,8 @@ The rest are kept off the page, saved in `$.store`, and changed with `/jev-model
 | `cache_min_tokens` | 20000 | 0 to 10000000 |
 | `cache_min_hit_ratio` | 0.8 | 0 to 1 |
 | `cache_ttl` | auto | auto / 5m / 1h |
-| `cost_horizon` | 5 | 1 to 100 requests |
-| `effort_output_low` … `effort_output_max` | 1 / 2 / 4 / 8 / 16 | 0.01 to 100 (relative output, until seen) |
+| `cost_horizon` | 0 (learned from recent turns) | 0 to 100 requests |
+| `cost_tolerance` | 0.03 | 0 to 0.5 (share of the cheapest feasible cost) |
 | `auto_probe` | true | true / false |
 | `jev_context_chars` | 2000 | 0 to 8000 |
 | `jev_context_messages` | 6 | 1 to 12 |
@@ -185,6 +190,7 @@ Each setting has one home and is read from it alone. `/jev-model unset <name>` r
 | Command | What it does |
 |---|---|
 | `/jev-model` | Status: mode, threshold, routable models, probe results, cost basis, last step |
+| `/jev-model skills` / `skills on` / `skills off` | Shows or saves `skill_routing`, the skill selection switch |
 | `/jev-model on` / `dry-run` / `off` | Saves `model_routing`. `off` restores Claude Code's own behaviour, because the router never changes `/model` or settings |
 | `/jev-model cache` | Shows the cache and cost settings |
 | `/jev-model fallback <session\|haiku\|sonnet\|opus>` | Saves the fallback model used when Jev gives no answer |
@@ -203,8 +209,8 @@ Logging is **off by default**. Turn on `Write log` in the plugin settings to rec
 
 Logs go to `~/.claude/plugins/data/jev-router-jev-local/logs/YYYY-MM-DD.jsonl` (UTC dates). Each line has one of these types:
 
-- `round`: Jev's skill answers, `jev_feasible` per tier and effort, `candidates` (every pair with its feasibility and cost parts, cheapest first), `cost_basis` (context size, cache status, cache lifetime source, horizon, output averages), the `decision` (pair, `how`, cost, threshold), recent-context metadata (source, message count, length; never the text), and each Jev call's status, latency and token counts.
-- `step`: the model and effort a request came with, Jev's recommended pair, the final recommendation, what was sent, the model the API reported answering, reasons and fallback. `observed_usage` holds actual counters or null; `cache_advice` holds the estimated cache state and, when calculable, the older switching estimate.
+- `round`: Jev's skill answers, `jev_feasible` per tier and effort, `candidates` (every pair with its feasibility and cost parts, cheapest first), `cost_basis` (context size, cache status, cache lifetime source, horizon and where it came from, tolerance, output sample count and median per effort), the `decision` (pair, `how`, cost, threshold), recent-context metadata (source, message count, length; never the text), and each Jev call's status, latency and token counts.
+- `step`: the model and effort a request came with, Jev's recommended pair, the final recommendation, what was sent, the model the API reported answering, reasons and fallback. `observed_usage` holds actual counters or null; `cache_advice` holds the estimated cache state and, when calculable, the older switching estimate for a model change.
 - `load`, `turn`, `probe`, `session`, `reset`.
 
 The log never holds the API key, request headers, prompt text, excerpt text or skill text.
@@ -241,5 +247,5 @@ Validated and mock-tested with Claude Code 2.1.296 (the binary bundled in the of
 2. Keep `dry-run` and turn on `Write log`. On first use the next message probes each unknown family by itself (one tiny subagent each, a toast, and `jev-router: model probe finished` in place of each reply); `/jev-model probe` does the same on demand and also arms the resend check. Confirm the learned ids in `/jev-model`, then `/jev-model on`.
 3. Build a long context and send follow-ups. In `/jev-log`, check the round's `cost_basis` (TTL `subscription-1h` on a subscription), `candidates` and `decision`, and the steps' `observed_usage` read/write counts.
 4. Send a request a small model clearly cannot do well and check that its pairs fall below the threshold in `jev_feasible`, so a dearer able pair runs.
-5. Wait past the cache lifetime and confirm the next turn sees `expired` and staying is costed as a rebuild; a running tool loop keeps its plan. Confirm `/clear`, `/resume`, compaction and a separate chat start without earlier cache facts.
+5. Wait past the cache lifetime and confirm the next turn sees `expired` and staying is costed as a rebuild for a model switch only; a running tool loop keeps its plan. Confirm `/clear`, `/resume`, compaction and a separate chat start without earlier cache facts.
 6. Change a description with `/jev-model set`, reload, and confirm `/jev-model settings` and the next request use it. Restore with `unset` or `defaults`.

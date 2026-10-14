@@ -30,6 +30,7 @@ const row = (field: string, value: unknown, kind: string) => ({ key: `jev-router
 export const PLUGIN_ROWS = [
   row('model_threshold', 0.9, 'number'),
   row('fits_threshold', 0.3, 'number'),
+  row('skill_routing', true, 'boolean'),
   row('fallback_model', 'opus', 'choice'),
   row('typesafe_api_key', 'secret-not-listed', 'text'),
   row('reset_to_defaults', true, 'boolean'),
@@ -40,6 +41,7 @@ const MANIFEST = JSON.stringify({
     typesafe_api_key: { type: 'string' },
     model_threshold: { type: 'number', default: 0.5 },
     fits_threshold: { type: 'number', default: 0.3 },
+    skill_routing: { type: 'boolean', default: true },
     fallback_model: { type: 'string', default: 'session' },
     reset_to_defaults: { type: 'boolean', default: false },
     ...Object.fromEntries(Object.entries(SHARED).filter(([, spec]) => spec.where === 'page').map(([key, spec]) => [key, { default: spec.default }])),

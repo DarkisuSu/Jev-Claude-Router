@@ -205,16 +205,16 @@ export const estimateSwitch = (current: string, target: string, evidence: Eviden
   return { kind: 'api-resource-proxy', pricingAsOf: PRICING_AS_OF, contextTokens: n, reusableTokens: reusable, targetReusableTokens: 0, stayFirst, switchFirst, switchingPremium, stayFuture, switchFuture, savingsPerFutureTurn, breakevenTurns, projectedSavings: config.breakevenTurns * savingsPerFutureTurn - switchingPremium, horizon: config.breakevenTurns, assumptions: ['same-token-count-proxy-across-tokenizers', targetCacheable ? 'full-prefix-cache-write-on-switch' : 'target-below-minimum-cache-length-no-future-hits', 'no-historical-target-cache-assumed', 'last-output-and-growth-repeated', 'one-request-per-future-turn-within-ttl', 'no-effort-output-savings-assumed', 'not-subscription-quota-or-billing'] }
 }
 
-export type CacheAdvice = { mode: 'advisory'; reason: string; effortReason: string; evidence: Evidence; estimate?: CostEstimate; effortEstimate?: CostEstimate }
+export type CacheAdvice = { mode: 'advisory'; reason: string; effortReason: string; evidence: Evidence; estimate?: CostEstimate }
 export const cacheAdvice = (current: Step, proposed: Step, state: CacheState, now: number, config: CacheConfig): CacheAdvice => {
   const evidence = cacheEvidence(state, now, config)
   const modelChange = current.model !== proposed.model
   const effortChange = current.effort !== proposed.effort
   const estimate = modelChange ? estimateSwitch(current.model, proposed.model, evidence, config) : undefined
-  const effortEstimate = !modelChange && effortChange ? estimateSwitch(current.model, current.model, evidence, config) : undefined
   return {
-    mode: 'advisory', evidence, estimate, effortEstimate,
+    mode: 'advisory', evidence, estimate,
     reason: !modelChange ? 'same-model' : estimate ? 'model-change-estimated' : 'model-change-cost-unknown',
-    effortReason: !effortChange ? 'same-effort' : modelChange ? 'model-switch-rebuild' : effortEstimate ? 'effort-rebuild-estimated' : 'effort-change-cost-unknown',
+    // Two effort changes were seen to keep the cache: none is assumed to rebuild it.
+    effortReason: !effortChange ? 'same-effort' : modelChange ? 'model-switch-rebuild' : 'effort-change-no-rebuild-seen',
   }
 }

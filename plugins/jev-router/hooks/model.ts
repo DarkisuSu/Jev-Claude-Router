@@ -69,8 +69,9 @@ export type Decision = {
   effortReason?: string
   feasible?: Feasible
   feasibleThreshold?: number
-  // 'cheapest-feasible', or 'none-feasible-most-capable' when no pair clears
-  // the threshold.
+  // 'cheapest-feasible'; 'most-feasible-within-tolerance' when a pair costing
+  // little more than the cheapest was judged likelier to do the work; or
+  // 'none-feasible-most-capable' when no pair clears the threshold.
   how?: string
   usd?: number
   // Every pair costed, cheapest first.
@@ -87,8 +88,17 @@ const cheaper = (a: Candidate, b: Candidate) => {
   return FAMILIES.indexOf(a.family) - FAMILIES.indexOf(b.family) || EFFORTS.indexOf(a.effort) - EFFORTS.indexOf(b.effort)
 }
 
+// How much likelier (in Jev's feasibility) a pair costing a little more must
+// be to replace the cheaper one: Jev's per-effort answers differ by hundredths
+// that are not worth a dearer pair (and an effort whose cost is not measured
+// yet looks as cheap as the others).
+export const FEASIBILITY_MARGIN = 0.05
+
 // Jev judges whether each tier at each effort can do the work; the router
-// costs each pair and takes the cheapest Jev judges feasible. With none
+// costs each pair and takes the cheapest Jev judges feasible. Pairs costing
+// within `tolerance` (a share) of that one may replace it, in cost order, by
+// being likelier by FEASIBILITY_MARGIN or more: cost differences that small
+// are estimates, and a clearly likelier pair is worth them. With none
 // feasible, the pair Jev judges most able (the cheaper of equals).
 export const decide = (
   round: string,
@@ -96,6 +106,7 @@ export const decide = (
   routable: readonly Family[],
   cost: (family: Family, effort: Effort) => { usd?: number; rank?: number },
   threshold: number,
+  tolerance = 0,
 ): Decision => {
   const d: Decision = { round, feasible, feasibleThreshold: threshold }
   const candidates: Candidate[] = []
@@ -111,8 +122,15 @@ export const decide = (
   }
   const sorted = [...candidates].sort(cheaper)
   const able = sorted.filter(c => c.feasible >= threshold)
-  const pick = able[0] ?? [...sorted].sort((a, b) => b.feasible - a.feasible)[0]!
+  let pick = able[0] ?? [...sorted].sort((a, b) => b.feasible - a.feasible)[0]!
   d.how = able.length > 0 ? 'cheapest-feasible' : 'none-feasible-most-capable'
+  if (able.length > 0 && tolerance > 0 && pick.usd !== undefined) {
+    // `able` is in cost order: each step up must be clearly likelier.
+    const near = able.filter(c => c.usd !== undefined && c.usd <= pick.usd! * (1 + tolerance))
+    const likelier = near.reduce((best, c) => (c.feasible >= best.feasible + FEASIBILITY_MARGIN - 1e-9 ? c : best), near[0]!)
+    if (likelier !== pick) d.how = 'most-feasible-within-tolerance'
+    pick = likelier
+  }
   d.family = pick.family
   d.effort = pick.effort
   d.usd = pick.usd
