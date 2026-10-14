@@ -1,0 +1,101 @@
+{
+  "name": "jev-router",
+  "displayName": "Jev Router",
+  "version": "0.3.0",
+  "description": "Asks TypeSafe Jev on each new prompt which local skills fit and which Claude model and effort to use",
+  "author": {
+    "name": "Darkisu.Su"
+  },
+  "license": "UNLICENSED",
+  "userConfig": {
+    "typesafe_api_key": {
+      "type": "string",
+      "title": "General · TypeSafe API key",
+      "description": "Key for api.typesafe.ai. Stored in secure storage. The router stays off while it is empty.",
+      "sensitive": true
+    },
+    "enabled": {
+      "type": "boolean",
+      "title": "General · Router enabled",
+      "description": "Turn the Jev skill router on or off without uninstalling it.\nDefault: on",
+      "default": true
+    },
+    "write_log": {
+      "type": "boolean",
+      "title": "General · Write log",
+      "description": "Record each round and step to the plugin data folder. Prompt text and keys are never written.\nDefault: off",
+      "default": false
+    },
+    "reset_to_defaults": {
+      "type": "boolean",
+      "title": "General · Reset all settings to defaults",
+      "description": "Turn on to restore every setting below. The API key is kept. The switch turns itself off.\nDefault: off",
+      "default": false
+    },
+    "mode": {
+      "type": "string",
+      "title": "Skill · Load mode",
+      "description": "hint: suggest the skill so Claude loads it with the Skill tool. inject: add its SKILL.md text directly (not a native activation).\nDefault: hint",
+      "options": [
+        "hint",
+        "inject"
+      ],
+      "default": "hint"
+    },
+    "gate_threshold": {
+      "type": "number",
+      "title": "Skill · Gate threshold",
+      "description": "Below this mean gate score, no skill is suggested. The Skill Suggestion cookbook value.\nDefault: 0.3",
+      "min": 0,
+      "max": 1,
+      "default": 0.3
+    },
+    "fits_threshold": {
+      "type": "number",
+      "title": "Skill · Fits threshold",
+      "description": "Every shortlisted skill whose fit reaches this is suggested, with no count limit. The Skill Suggestion cookbook value.\nDefault: 0.3",
+      "min": 0,
+      "max": 1,
+      "default": 0.3
+    },
+    "model_routing": {
+      "type": "string",
+      "title": "Model · Model routing",
+      "description": "off: never change the model. dry-run: log what Jev would send, change nothing. on: send each main request with Jev's choice when it is confident.\nDefault: dry-run",
+      "options": [
+        "off",
+        "dry-run",
+        "on"
+      ],
+      "default": "dry-run"
+    },
+    "model_threshold": {
+      "type": "number",
+      "title": "Model · Model confidence threshold",
+      "description": "Jev's model choice is used only when its confidence reaches this. TypeSafe Confidence guide example floor.\nDefault: 0.5",
+      "min": 0,
+      "max": 1,
+      "default": 0.5
+    },
+    "fallback_model": {
+      "type": "string",
+      "title": "Model · Fallback model",
+      "description": "Used when Jev is not confident or fails. session: the model you chose with /model. The chat panel's model display never changes.\nDefault: session",
+      "options": [
+        "session",
+        "haiku",
+        "sonnet",
+        "opus"
+      ],
+      "default": "session"
+    },
+    "effort_threshold": {
+      "type": "number",
+      "title": "Effort · Effort confidence threshold",
+      "description": "Jev's effort choice is used only when its confidence reaches this. Lower than the model threshold because effort confidence runs lower.\nDefault: 0.4",
+      "min": 0,
+      "max": 1,
+      "default": 0.4
+    }
+  }
+}
