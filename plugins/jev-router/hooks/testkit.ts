@@ -112,6 +112,8 @@ export type World = {
   sets: { key: string; value: unknown }[]
   fetches: { url: string; auth?: string; body: string }[]
   written: Map<string, string>
+  deletedFiles: string[]
+  processRuns: { argv: string[]; env?: Record<string, string> }[]
   seen?: { text: string; context?: readonly string[] }
   sessionId: string
   contextTokens?: number
@@ -124,9 +126,13 @@ export type World = {
   messageReads: number
 }
 
+// On Windows the engine hands fs hooks native backslash paths; files are kept
+// under one spelling (forward slashes), as the tests name them.
+const slash = (path: string) => path.replace(/\\/g, '/')
+
 export const world = (on: On, jev: Jev, extra?: { version?: string; gui?: Record<string, unknown> }): World => {
   const configRows = [...PLUGIN_ROWS.map(r => ({ ...r })), ...Object.entries(SHARED).filter(([, spec]) => spec.where === 'page').map(([key, spec]) => row(key, extra?.gui?.[key] ?? spec.default, spec.kind))]
-  const w: World = { fetches: [], written: new Map(), sets: [], sessionId: 'test-session', configRows, status: [], messages: [], messageReads: 0 }
+  const w: World = { fetches: [], written: new Map(), deletedFiles: [], processRuns: [], sets: [], sessionId: 'test-session', configRows, status: [], messages: [], messageReads: 0 }
   mock.env(on, { USERPROFILE: HOME })
   on('command.list', () => ({ value: COMMANDS }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
@@ -146,16 +152,57 @@ export const world = (on: On, jev: Jev, extra?: { version?: string; gui?: Record
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: w.contextTokens, window: w.window }, rateLimits: [{ kind: 'five_hour', percentUsed: 1 }] } as never }))
   on('session.model', () => ({ value: w.sessionModel ?? 'opus' }))
-  on('fs.list', ($, e) => ({ deny: `no folder ${e.path}` }))
-  on('fs.exists', ($, e) => ({ value: w.written.has(e.path) }))
+  on('fs.list', ($, e) => {
+    const prefix = `${e.path.replace(/\\/g, '/').replace(/\/+$/, '')}/`
+    const children = new Map<string, { name: string; kind: 'file' | 'dir' }>()
+    for (const path of w.written.keys()) {
+      const normalized = path.replace(/\\/g, '/')
+      if (!normalized.startsWith(prefix)) continue
+      const rest = normalized.slice(prefix.length)
+      if (!rest) continue
+      const [name, ...nested] = rest.split('/')
+      children.set(name!, { name: name!, kind: nested.length > 0 ? 'dir' : 'file' })
+    }
+    return { value: [...children.values()] as never }
+  })
+  on('fs.exists', ($, e) => {
+    const path = e.path.replace(/\\/g, '/').replace(/\/+$/, '')
+    const value = [...w.written.keys()].some(file => {
+      const normalized = file.replace(/\\/g, '/').replace(/\/+$/, '')
+      return normalized === path || normalized.startsWith(`${path}/`)
+    })
+    return { value }
+  })
+  on('fs.stat', ($, e) => {
+    const path = e.path.replace(/\\/g, '/').replace(/\/{2,}/g, '/').replace(/\/+$/, '').toLowerCase()
+    const files = [...w.written.entries()].map(([file, content]) => ({ path: file.replace(/\\/g, '/').replace(/\/{2,}/g, '/').replace(/\/+$/, '').toLowerCase(), content }))
+    const file = files.find(f => f.path === path)
+    const directory = files.some(f => f.path.startsWith(`${path}/`))
+    if (!file && !directory) return { deny: `no path ${e.path}` }
+    return { value: { kind: file ? 'file' : 'dir', size: file?.content.length ?? 0, mtimeMs: 0, isLink: false, realPath: path } as never }
+  })
   on('fs.read', ($, e) => {
     if (e.path.replace(/\\/g, '/').endsWith('/.claude-plugin/plugin.json')) return { value: MANIFEST }
-    const text = w.written.get(e.path)
+    const text = w.written.get(slash(e.path))
     return text === undefined ? { deny: `no file ${e.path}` } : { value: text }
   })
   on('fs.write', ($, e) => {
-    w.written.set(e.path, e.text)
+    w.written.set(slash(e.path), e.text)
     return { value: undefined }
+  })
+  on('process.run', ($, e) => {
+    const argv = [...e.argv]
+    const env = e.init?.env ? { ...e.init.env } : undefined
+    w.processRuns.push({ argv, env })
+    const command = argv[0]?.split(/[\\/]/).at(-1)?.toLowerCase()
+    const path = command === 'powershell.exe'
+      ? env?.JEV_ROUTER_DELETE_PATH
+      : command === 'rm' && argv[1] === '-f' && argv[2] === '--' ? argv[3] : undefined
+    if (path) {
+      w.deletedFiles.push(path)
+      w.written.delete(slash(path))
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } as never }
   })
   on('http.fetch', async ($, e) => {
     const body = e.init?.body ?? ''

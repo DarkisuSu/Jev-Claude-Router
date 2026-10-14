@@ -70,6 +70,34 @@
       "max": 1,
       "default": 0.3
     },
+    "tool_routing": {
+      "type": "boolean",
+      "title": "Tool · Tool selection",
+      "description": "Jev suggests a saved tool (a script an assistant wrote for earlier work) when a request looks like work it already did. Claude decides whether to run it; nothing runs by itself. Off: saved tools are neither asked about nor suggested.\nDefault: on",
+      "default": true
+    },
+    "tool_save": {
+      "type": "boolean",
+      "title": "Tool · Let Claude save tools",
+      "description": "Expose the save_tool tool and tell Claude to save scripts it writes for repeatable work. Only a pointer, a description and how to run it are kept (never the file's content), in your own Claude data, not in the project. Manage them with /jev-tool.\nDefault: on",
+      "default": true
+    },
+    "tool_threshold": {
+      "type": "number",
+      "title": "Tool · Selection threshold",
+      "description": "A saved tool is suggested when Jev puts at least this probability on it, among all saved tools and none. Raise it to suggest fewer.\nDefault: 0.5",
+      "min": 0,
+      "max": 1,
+      "default": 0.5
+    },
+    "tool_save_threshold": {
+      "type": "number",
+      "title": "Tool · Save threshold",
+      "description": "A tool is saved only when Jev judges it at least this likely to serve other work, not just the task it was written for. 0 saves without asking Jev.\nDefault: 0.5",
+      "min": 0,
+      "max": 1,
+      "default": 0.5
+    },
     "model_routing": {
       "type": "string",
       "title": "Model · Model routing",

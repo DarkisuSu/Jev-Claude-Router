@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { recentContext, routingFacts, scrubText, type MessageLike } from './awareness'
+import { STATE_CHAR_BUDGET, recentContext, routingFacts, scrubText, type MessageLike } from './awareness'
 import { cacheEvidence, observeUsage, withContext } from './cache'
 import { sharedConfig } from './settings'
 import { rankWideBody, route } from './router'
@@ -44,6 +44,28 @@ describe('bounded task context', () => {
     expect(recent.truncated).toBe(true)
     for (const sensitive of [secret, 'hidden', 'sk-ant-secret12345678']) expect(recent.text.includes(sensitive)).toBe(false)
     expect(scrubText('Authorization: Bearer secret123456789')).toContain('[redacted]')
+  })
+  test('short messages keep all of theirs and the long one takes the rest of the budget, keeping its start and its end', () => {
+    const long = `START ${'middle '.repeat(3000)} CONCLUSION: use the lock`
+    const messages: MessageLike[] = [{ role: 'user', text: 'First short question.' }, { role: 'assistant', text: long }, { role: 'user', text: 'Second short question.' }]
+    const recent = recentContext(messages, 'Continue', { ...config.awareness, maxChars: 1000, messages: 10 })
+    expect(recent.text.length).toBeLessThanOrEqual(1000)
+    expect(recent.text.length).toBeGreaterThan(950)
+    expect(recent.text).toContain('user: First short question.')
+    expect(recent.text).toContain('user: Second short question.')
+    expect(recent.text).toContain('assistant: START')
+    expect(recent.text).toContain('CONCLUSION: use the lock')
+    expect(recent.text).toContain(' … ')
+    expect(recent.truncated).toBe(true)
+  })
+  test('what fits is sent whole: no ellipsis and nothing marked truncated', () => {
+    const recent = recentContext([{ role: 'user', text: 'Fix the ledger.' }, { role: 'assistant', text: 'Added a lock.' }], 'Continue', { ...config.awareness, maxChars: 1000, messages: 10 })
+    expect(recent.text).toBe('user: Fix the ledger.\nassistant: Added a lock.')
+    expect(recent.truncated).toBe(false)
+  })
+  test('the conversation sent to Jev defaults to a large share of what Jev takes', () => {
+    expect(config.awareness).toEqual({ enabled: true, maxChars: 12000, messages: 16 })
+    expect(STATE_CHAR_BUDGET).toBe(24000)
   })
   test('disabled or unavailable context has no invented summary', () => {
     expect(recentContext(undefined, 'Continue', config.awareness).source).toBe('unavailable')
@@ -207,6 +229,26 @@ describe('awareness engine integration', () => {
     expect(context.per_tier.sonnet.context_window_reported).toBe(1000000)
     expect(context.per_tier.haiku.context_window_reported).toBe(null)
     expect(body.questions['feasible::haiku::low'].instructions).toContain('routing_context.context')
+  })
+  test('a long prompt and a long conversation together stay inside the state budget Jev can take', { options }, async ($, on) => {
+    mock.clock(on); mock.store(on, { caps, advanced: { max_prompt_chars: 20000, jev_context_chars: 20000, jev_context_messages: 40 } })
+    const w = world(on, answer({ 'sonnet::medium': 0.9 })); bottom(on, w)
+    w.messages = Array.from({ length: 30 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', text: `message ${i} ${'detail '.repeat(800)}` }))
+    await begin($, 'a', 'Q'.repeat(30000))
+    const state = JSON.parse(w.fetches[0]!.body).state
+    expect(state.request.length).toBeLessThanOrEqual(21000)
+    expect(state.request.length + state.recent_context.length).toBeLessThanOrEqual(24000 - 3000)
+    expect(state.recent_context.length).toBeGreaterThan(0)
+  })
+  test('with a short prompt the excerpts can use a big share', { options }, async ($, on) => {
+    mock.clock(on); mock.store(on, { caps })
+    const w = world(on, answer({ 'sonnet::medium': 0.9 })); bottom(on, w)
+    w.messages = Array.from({ length: 30 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', text: `message ${i} ${'detail '.repeat(800)}` }))
+    await begin($, 'a')
+    const state = JSON.parse(w.fetches[0]!.body).state
+    expect(state.recent_context.length).toBeGreaterThan(11500)
+    expect(state.recent_context.length).toBeLessThanOrEqual(12000)
+    expect(state.recent_context.split('\n').length).toBe(16)
   })
   test('history sharing can be disabled without reading session messages', { options: { ...options, jev_context_enabled: false } }, async ($, on) => {
     mock.clock(on); mock.store(on, { caps })

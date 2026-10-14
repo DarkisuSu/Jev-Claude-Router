@@ -5,6 +5,8 @@ A Claude Code mod that asks TypeSafe Jev on each new prompt two things:
 - Which local skills fit the prompt. It follows the two-request flow in the [Skill Suggestion cookbook](https://docs.typesafe.ai/cookbooks/skill_suggestion).
 - Whether each Claude model tier, at each reasoning effort, can do the work. Jev sees the request, short excerpts of the recent conversation, the conversation size and what each tier is known to hold. The router costs every pair (cache rebuild and output included) and applies the cheapest one Jev judges able to each main request through `turn.step`.
 
+It also keeps a list of tools Claude wrote for earlier work (see [Saved tools](#saved-tools)) and asks Jev which one, if any, fits the new prompt.
+
 During the task it also gives Claude a general-purpose decision tool, with system instructions to automatically submit eligible assistant-owned judgments to Jev. The questions and options come from the current task, with no fixed list of action categories. This feature is independent of prompt-time skill and model routing.
 
 Release installation: `/plugin install jev-router --marketplace DarkisuSu/Jev-Claude-Router#main`. Unreleased changes are tested from the local `development` checkout.
@@ -26,6 +28,31 @@ Release installation: `/plugin install jev-router --marketplace DarkisuSu/Jev-Cl
 - `inject`: adds the SKILL.md text in a block marked `activation="injected-not-native"`. This is not a native activation.
 
 **Load tracking:** a `tool.call` hook on the Skill tool records real native loads, with `skill.prompt` as a second source. Each turn's log entry marks every routed skill `native-loaded`, `injected` or `not-loaded`.
+
+## Saved tools
+
+Claude often writes a script for a piece of work (a converter, a check, a report). When the same kind of work comes again, it can start from that script instead of rewriting it.
+
+**Saving.** With `tool_save` on, Claude gets a `save_tool` tool and a system instruction: when it notices repeated work, or writes a script a similar task will want again, it saves it with a name, a one-line description of the kind of task it solves, how to run it, and the file's absolute path. Before saving, the router checks the file exists and asks Jev one Noul, judged from the description alone (no code or file content is sent): will this tool serve a different future task of the same kind? Below `tool_save_threshold` (0.5) the save is declined; if Jev cannot be reached, the save goes ahead; with the threshold at 0, Jev is not asked. Saving a name again updates it. A description or usage holding a credential-like value or a code block is refused, not rewritten.
+
+**What is kept.** A pointer: name, description, usage, path, scope, who saved it, and use counts. Never the file's content. The lists live in Claude Code's plugin store, not in the project or in Git: one per project (keyed by a hash of the project folder) and one global. Past `tool_max` (50) per scope, the least recently used tool an assistant saved goes.
+
+**Whose tool it is.** Every entry records its origin. What an assistant saved with `save_tool` is a cache of its own work: it is marked "saved by an assistant" in the hint, can be cleared in bulk, and its script file is deleted with it. What you register with `/jev-tool add <name> <absolute path> [project|global] <what it does>` is yours: marked "registered by the user", not judged by Jev, not counted against `tool_max`, left alone by every bulk clear and eviction, and its file is never deleted by the plugin. An assistant's save never replaces a tool of yours with the same name, and is declined if the list is full of your own tools. Only `/jev-tool clear <name>` removes one of yours, and that removes the entry, not the file.
+
+**Choosing.** With `tool_routing` on and at least one saved tool, request 1 also asks one Choice, `tool_which`, among the project's tools, the global ones (a project tool hides a global one of the same name) and `none`. Each tool Jev puts at least `tool_threshold` (0.5) probability on, up to `tool_hints` (3), is suggested beside the prompt, if its file still exists:
+
+```
+<tool_relevance source="jev-router (TypeSafe Jev)">
+A tool saved from earlier work may fit this request. An assistant wrote it: read the file before running it, run it only if it fits, and ignore this hint otherwise. Normal permission checks apply.
+- csv_to_json (project): Converts CSV exports to JSON
+  run: python tools/csv_to_json.py in.csv out.json
+  file: C:/work/tools/csv_to_json.py
+</tool_relevance>
+```
+
+Nothing runs by itself: Claude decides, and its own permission checks apply. A shell command that names a suggested tool's file counts as a use. The round log records how many tools were offered, which were picked (name, scope, probability) and how many were skipped because the file was gone; never descriptions or paths.
+
+**Managing.** `/jev-tool` lists both layers (your own marked `[yours]`) and flags missing files; `/jev-tool show <name>`, `/jev-tool add …`, `/jev-tool clear <name|all|missing> [project|global]`, `/jev-tool on|off` (selection) and `/jev-tool save on|off`. `clear all` and `clear missing` take only what assistants saved. Clearing an assistant's tool also deletes its script file when no saved-tool list still refers to it (so a file you also registered survives); add `--keep-files` to keep the files (see [Logs](#logs) for `/jev-data`).
 
 ## Automatic decisions during a task
 
@@ -140,7 +167,9 @@ The step log also keeps the older switching estimate for a model change (`cache_
 
 ### Recent context
 
-With `jev_context_enabled` on (default), Jev gets up to `jev_context_chars` (2000) characters from the last `jev_context_messages` (6) user and assistant messages. Tool calls and results, subagent text, slash commands, router notes, code blocks and skill bodies are left out. The TypeSafe key, `Bearer` tokens, private keys and `password=`/`api_key=`-style values are redacted before sending. Excerpts go to `api.typesafe.ai` with the prompt; they are never logged.
+With `jev_context_enabled` on (default), Jev gets up to `jev_context_chars` (12000) characters from the last `jev_context_messages` (16) user and assistant messages. The same excerpts serve every question in the request: skills, saved tools and the model and effort feasibility. Tool calls and results, subagent text, slash commands, router notes, code blocks and skill bodies are left out. The TypeSafe key, `Bearer` tokens, private keys and `password=`/`api_key=`-style values are redacted before sending. Excerpts go to `api.typesafe.ai` with the prompt; they are never logged.
+
+**How the budget is spent.** The budget is used in full: a short message keeps all of its text and the long ones share the rest, shortest first. A message that has to be cut keeps its start and its end (an answer's conclusion is usually in its last lines), marked with ` … `. The prompt and the excerpts share one state budget of 24000 characters (`STATE_CHAR_BUDGET`): Jev 1.13 takes 32k tokens for the state plus its longest question, a character can be a whole token (CJK, code), and the longest question (the skills) takes a share. The prompt is held to `max_prompt_chars` (4000) and the excerpts to what it leaves, 3000 characters being kept back for the routing facts. Only one model is offered (`jev-1.13.0`; `jev-latest` and `jev-preview` point to it), at $0.042 per million input tokens, so a full request costs a fraction of a cent. More conversation also means more of it leaves your machine for `api.typesafe.ai`: lower `jev_context_chars` to share less, or turn `jev_context_enabled` off.
 
 ### Context size
 
@@ -180,6 +209,10 @@ The settings page holds the settings people change:
 | Write log | off |
 | Reset all settings to defaults | off |
 | Skill selection | on |
+| Tool selection (`tool_routing`) | on |
+| Let Claude save tools (`tool_save`) | on |
+| Tool selection threshold (`tool_threshold`) | 0.5 |
+| Tool save threshold (`tool_save_threshold`) | 0.5 |
 | Automatic decisions (`decision_routing`) | on |
 | Load mode | hint |
 | Gate threshold | 0.3 |
@@ -201,12 +234,14 @@ The rest are kept off the page, saved in `$.store`, and changed with `/jev-model
 | `cost_horizon` | 0 (learned from recent turns) | 0 to 100 requests |
 | `cost_tolerance` | 0.03 | 0 to 0.5 (share of the cheapest feasible cost) |
 | `auto_probe` | true | true / false |
+| `tool_max` | 50 | 1 to 200 saved tools per scope |
+| `tool_hints` | 3 | 1 to 5 tools suggested per request |
 | `decision_confidence_threshold` | 0.6 | 0.5 to 1 |
-| `jev_context_chars` | 2000 | 0 to 8000 |
-| `jev_context_messages` | 6 | 1 to 12 |
+| `jev_context_chars` | 12000 | 0 to 20000 |
+| `jev_context_messages` | 16 | 1 to 40 |
 | `jev_model` | jev-latest | 1 to 64 characters |
-| `timeout_ms` | 8000 | 1000 to 9000 |
-| `max_prompt_chars` | 2000 | 200 to 20000 |
+| `timeout_ms` | 9000 | 1000 to 9000 |
+| `max_prompt_chars` | 4000 | 200 to 20000 |
 | `shortlist_size` | 3 | 1 to 12 |
 
 Each setting has one home and is read from it alone. `/jev-model unset <name>` restores one default; `/jev-model defaults` (or the reset switch) restores both homes and keeps the API key. All defaults are starting points, not measured optimums.
@@ -226,8 +261,10 @@ Each setting has one home and is read from it alone. `/jev-model unset <name>` r
 | `/jev-model probe` | Learns each family's full id and effort support through tiny subagents |
 | `/jev-model reset` | Clears learned ids and this session's failed models |
 | `/jev-model models` | Shows the models this Claude Code lists and which are routable |
-| `/jev-log` | Shows the last 20 log lines: rounds, steps, loads, turns, probes |
+| `/jev-log` | Shows the last 20 log lines; `/jev-log clear [today|all]` empties today's or every dated log file |
+| `/jev-data` | Shows local Jev data; clear logs, learned routing data, saved-tool indexes, or all of those |
 | `/jev-index` | Shows the skill index |
+| `/jev-tool` | Saved tools: list, show, add (your own), clear (assistant-saved ones, script files too unless `--keep-files`), on/off, save on/off |
 
 ## Logs
 
@@ -241,6 +278,17 @@ Logs go to `~/.claude/plugins/data/jev-router-jev-local/logs/YYYY-MM-DD.jsonl` (
 - `decision`: typed-decision outcome, question count, uncertain count, threshold and duration only.
 
 The log never holds the API key, request headers, prompt text, excerpt text or skill text.
+
+`/jev-log clear` empties the current UTC day's log; `/jev-log clear all` empties all dated Jev log files. `/jev-data` shows the local data categories and supports:
+
+- `/jev-data clear logs [today|all]` (defaults to all dated logs).
+- `/jev-data clear learned` removes learned model capabilities, output samples and turn lengths, and resets this session's temporary routing facts.
+- `/jev-data clear tools [project|global|all] [--keep-files]` removes the saved-tool index entries assistants saved (defaults to all projects and global) and deletes their unshared script files. Tools you registered with `/jev-tool add` are kept, files included. Use `--keep-files` to preserve the scripts too.
+- `/jev-data clear all [--keep-files]` clears logs, learned data, assistant-saved tool indexes and their unshared script files together; your own registered tools stay. Use `--keep-files` to preserve the scripts.
+
+`/jev-tool clear <name|all|missing> [project|global] [--keep-files]` offers the same cleanup for selected tools (`all` and `missing` skip yours; a name removes one of yours as an entry only). File deletion checks every project and global index for references after clearing, and only unlinks regular files; shared files, directories, symlinks and missing files are preserved or reported. The older `--delete-files` flag is still accepted for compatibility. On Claude Code's CLI, deletion uses `$.process.run`; environments without process execution can still clear the indexes.
+
+These clear commands preserve plugin settings and the API key. Log files are emptied and left as zero-byte dated files; if logging is enabled, new lines are written again on later events.
 
 The line under each answer names who answered: the actual answering model, the requested effort, and the pick (`cheapest feasible opus/high ~$0.865/5 requests`) or the fallback. The panel's model display can stay on the session model even when a request was routed; the line under the answer is the record.
 

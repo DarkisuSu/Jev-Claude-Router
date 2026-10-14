@@ -3,6 +3,14 @@
 import { cacheEvidence, type CacheConfig, type CacheState } from './cache'
 import { FAMILIES, type Caps, type Family, type Step } from './model'
 
+// What the request and the excerpts may total, in characters. Jev 1.13 takes
+// 32k tokens for the state plus its longest question; a character can be a
+// whole token (CJK, code), and the longest question (the skills, a long saved
+// tool list) takes a share, so the state is kept to 24k characters and the
+// rest of the 32k is left to it. A reserve covers the routing facts.
+export const STATE_CHAR_BUDGET = 24000
+export const STATE_RESERVE = 3000
+
 export type AwarenessConfig = { enabled: boolean; maxChars: number; messages: number }
 export type MessageLike = { role?: unknown; text?: unknown; toolUses?: unknown; toolResults?: unknown; agentId?: unknown; type?: unknown }
 export type RecentContext = { text: string; messages: number; source: 'session-excerpts' | 'unavailable' | 'disabled'; truncated: boolean }
@@ -20,6 +28,15 @@ export const scrubText = (text: string, secrets: readonly string[] = []): string
     .replace(/((?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|authorization|password|secret)\s*["']?\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]')
 }
 
+// A long message keeps its start and its end: an answer's conclusion is
+// usually in the last lines.
+const clip = (line: string, max: number) => {
+  if (line.length <= max) return line
+  if (max <= 40) return line.slice(0, max)
+  const head = Math.ceil(max * 0.6)
+  return `${line.slice(0, head)} … ${line.slice(line.length - (max - head - 3))}`
+}
+
 export const recentContext = (messages: readonly MessageLike[] | undefined, request: string, config: AwarenessConfig, secrets: readonly string[] = []): RecentContext => {
   if (!config.enabled || config.maxChars === 0) return { text: '', messages: 0, source: 'disabled', truncated: false }
   if (!messages) return { text: '', messages: 0, source: 'unavailable', truncated: false }
@@ -29,15 +46,25 @@ export const recentContext = (messages: readonly MessageLike[] | undefined, requ
   const last = rows.at(-1)
   if (last?.role === 'user' && (last.text as string).trim() === request.trim()) rows.pop()
   const selected = rows.slice(-config.messages)
-  const perMessage = Math.max(1, Math.floor(config.maxChars / Math.max(1, selected.length)) - 20)
-  let truncated = rows.length > selected.length
-  const lines: string[] = []
-  for (const row of selected) {
-    const clean = scrubText(row.text as string, secrets).trim()
-    if (!clean) continue
-    truncated ||= clean.length > perMessage
-    lines.push(`${row.role}: ${clean.slice(0, perMessage)}`)
+  const items = selected
+    .map(row => ({ line: `${row.role}: ${scrubText(row.text as string, secrets).trim()}`, empty: scrubText(row.text as string, secrets).trim() === '' }))
+    .filter(item => !item.empty)
+  // Spend the whole budget: short messages keep all of theirs and the rest is
+  // shared among the long ones, shortest first.
+  let budget = Math.max(0, config.maxChars - Math.max(0, items.length - 1))
+  const allotted: number[] = []
+  let left = items.length
+  for (const index of items.map((_, i) => i).sort((x, y) => items[x]!.line.length - items[y]!.line.length)) {
+    const share = Math.floor(budget / left)
+    allotted[index] = Math.min(items[index]!.line.length, Math.max(1, share))
+    budget -= allotted[index]!
+    left--
   }
+  let truncated = rows.length > selected.length
+  const lines = items.map((item, i) => {
+    truncated ||= allotted[i]! < item.line.length
+    return clip(item.line, allotted[i]!)
+  })
   const text = lines.join('\n').slice(0, config.maxChars)
   return { text, messages: lines.length, source: 'session-excerpts', truncated }
 }

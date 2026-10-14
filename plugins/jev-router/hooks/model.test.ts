@@ -523,7 +523,7 @@ describe('settings kept off the page', () => {
     await $.prompt.submit({ text: 'x'.repeat(1000), asUser: true })
     expect(requestChars()).toBe(300)
 
-    expect((await $.command.run({ command: 'jev-model', args: 'unset max_prompt_chars' })).text).toContain('back to its default (2000)')
+    expect((await $.command.run({ command: 'jev-model', args: 'unset max_prompt_chars' })).text).toContain('back to its default (4000)')
     await $.prompt.submit({ text: 'x'.repeat(1000), asUser: true })
     expect(requestChars()).toBe(1000)
   })
@@ -539,7 +539,7 @@ describe('settings kept off the page', () => {
     expect(JSON.parse(w.fetches[0]?.body ?? '{}').questions['feasible::opus::high'].instructions).toContain('Weigh Several Approaches carefully')
     const list = (await $.command.run({ command: 'jev-model', args: 'settings' })).text
     expect(list).toContain('effort_high = Weigh Several Approaches carefully  [changed')
-    expect(list).toContain('timeout_ms = 8000  [default]')
+    expect(list).toContain('timeout_ms = 9000  [default]')
   })
 
   test('an unknown name is refused with the list', { options: { typesafe_api_key: FAKE_KEY } }, async ($, on) => {

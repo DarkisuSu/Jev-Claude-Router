@@ -20,11 +20,31 @@ import {
   type Effort,
 } from './model'
 import { horizonFor, learnOutput, median, normalizeStats, outputSummary, pairCost, type OutputStats } from './cost'
-import { ENDPOINT } from './questions'
+import { ENDPOINT, saveQuestion } from './questions'
+import {
+  SAVE_DESCRIPTION,
+  SAVE_INSTRUCTIONS,
+  SAVE_SCHEMA,
+  SAVE_TOOL,
+  mergeTools,
+  parseReusable,
+  pickTools,
+  prepareTool,
+  readLibrary,
+  saveText,
+  toolHint,
+  isUserTool,
+  touchTool,
+  upsertTool,
+  usesTool,
+  type SaveResult,
+  type SavedTool,
+  type Scope,
+} from './tools'
 import { cacheAdvice, cacheEvidence, observeUsage, resetCache, withContext, type CacheState, type CacheAdvice, type UsageLike } from './cache'
 import { SHARED, parseSetting, settingValue, sharedConfig } from './settings'
 import { JevError, route, type RouteResult, type Send } from './router'
-import { EMPTY_ATTEMPT, recentContext, routingFacts, scrubText, type AttemptFacts } from './awareness'
+import { EMPTY_ATTEMPT, STATE_CHAR_BUDGET, STATE_RESERVE, recentContext, routingFacts, scrubText, type AttemptFacts } from './awareness'
 import { DECISION_TOOL, DECISION_DESCRIPTION, DECISION_INSTRUCTIONS, DECISION_SCHEMA, decisionText, prepareDecision, evaluateDecision } from './decisions'
 import {
   BODY_CHARS,
@@ -58,6 +78,7 @@ type Config = {
   enabled: boolean
   skillRouting: boolean
   decisionRouting: boolean
+  tools: ReturnType<typeof sharedConfig>['tools']
   decisionConfidence: number
   mode: 'hint' | 'inject'
   shortlist: number
@@ -94,8 +115,8 @@ export const readConfig = (o: PluginOptions): Config => ({
   writeLog: o.write_log === true,
   ...sharedConfig(o),
   model: 'jev-latest',
-  timeoutMs: 8000,
-  maxPromptChars: 2000,
+  timeoutMs: 9000,
+  maxPromptChars: 4000,
   routing: o.model_routing === 'on' ? 'on' : o.model_routing === 'off' ? 'off' : 'dry-run',
   fallback: o.fallback_model === 'haiku' || o.fallback_model === 'sonnet' || o.fallback_model === 'opus' ? o.fallback_model : 'session',
 })
@@ -194,6 +215,8 @@ const S: {
   index?: SkillIndex
   indexing?: Promise<SkillIndex>
   pending?: Round
+  // Saved tools suggested for the running turn, until the shell runs one.
+  hintedTools: SavedTool[]
   writes: Promise<void>
   roundSeq: number
   available: Available
@@ -238,6 +261,7 @@ const S: {
   hidden: {},
   hiddenLoaded: false,
   probeQueue: [],
+  hintedTools: [],
   probeAgents: new Set(),
   autoProbed: new Set(),
   turnProbes: new Map(),
@@ -338,10 +362,62 @@ async function recordStep($: EngineInterface, usage: UsageLike | null | undefine
 }
 
 async function logFile($: EngineInterface) {
+  const dir = await logDirectory($)
+  if (!dir) return undefined
+  const day = new Date(await $.clock.now()).toISOString().slice(0, 10)
+  return `${dir}/${day}.jsonl`
+}
+
+async function logDirectory($: EngineInterface) {
   const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
   if (!home) return undefined
-  const day = new Date(await $.clock.now()).toISOString().slice(0, 10)
-  return `${home.replace(/\\/g, '/')}/.claude/plugins/data/${LOG_DIR_NAME}/logs/${day}.jsonl`
+  return `${home.replace(/\\/g, '/').replace(/\/+$/, '')}/.claude/plugins/data/${LOG_DIR_NAME}/logs`
+}
+
+async function listLogFiles($: EngineInterface): Promise<{ directory?: string; files: string[]; available: boolean }> {
+  const directory = await logDirectory($)
+  if (!directory) return { files: [], available: false }
+  try {
+    if (!(await $.fs.exists(directory))) return { directory, files: [], available: true }
+    const entries = await $.fs.list(directory)
+    const files = entries
+      .filter(entry => entry.kind === 'file' && /^\d{4}-\d{2}-\d{2}\.jsonl$/i.test(entry.name))
+      .map(entry => `${directory}/${entry.name}`)
+    return { directory, files, available: true }
+  } catch {
+    return { directory, files: [], available: false }
+  }
+}
+
+// The filesystem facade has no unlink operation. Empty only the plugin's
+// dated JSONL files; never touch adjacent plugin data or user files.
+async function clearLogs($: EngineInterface, scope: 'today' | 'all') {
+  let files: string[]
+  try {
+    await S.writes
+    if (scope === 'today') {
+      const file = await logFile($)
+      if (!file) return { cleared: 0, failed: 1 }
+      files = (await $.fs.exists(file)) ? [file] : []
+    } else {
+      const listed = await listLogFiles($)
+      if (!listed.available) return { cleared: 0, failed: 1 }
+      files = listed.files
+    }
+  } catch {
+    return { cleared: 0, failed: 1 }
+  }
+  let cleared = 0
+  let failed = 0
+  for (const file of files) {
+    try {
+      await $.fs.write(file, '')
+      cleared++
+    } catch {
+      failed++
+    }
+  }
+  return { cleared, failed }
 }
 
 // Never the key, a header or the prompt's text: callers pass counts,
@@ -673,6 +749,443 @@ async function noteContextSeen($: EngineInterface, model: string, usage: UsageLi
   if (next) await saveCaps($, () => next)
 }
 
+// ---- saved tools. Two lists in $.store, kept out of the project and of Git:
+// one per project (by a hash of its folder) and one global.
+const GLOBAL_TOOLS_KEY = 'tools:global'
+const PROJECT_TOOLS_PREFIX = 'tools:project:'
+
+async function projectToolsKey($: EngineInterface) {
+  let cwd = ''
+  try {
+    cwd = (await $.session.cwd()).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  } catch {
+    // The hash of nothing: one shared project list.
+  }
+  return `${PROJECT_TOOLS_PREFIX}${(await sha256Prefix(cwd)) ?? 'unknown'}`
+}
+
+async function loadTools($: EngineInterface): Promise<{ project: SavedTool[]; global: SavedTool[] }> {
+  try {
+    return { project: readLibrary(await $.store.get(await projectToolsKey($)), 'project'), global: readLibrary(await $.store.get(GLOBAL_TOOLS_KEY), 'global') }
+  } catch {
+    return { project: [], global: [] }
+  }
+}
+
+async function writeTools($: EngineInterface, scope: Scope, list: readonly SavedTool[]) {
+  await $.store.set(scope === 'global' ? GLOBAL_TOOLS_KEY : await projectToolsKey($), list)
+}
+
+type SavedToolFileCleanup = { deleted: number; shared: number; missing: number; protected: number; failed: number }
+type ToolFileReference = { path: string; realPath?: string; unresolved?: boolean }
+
+const emptyToolFileCleanup = (): SavedToolFileCleanup => ({ deleted: 0, shared: 0, missing: 0, protected: 0, failed: 0 })
+
+// Compare saved paths across projects without changing Linux/macOS case
+// semantics. Windows drive paths and UNC paths are case-insensitive.
+function toolPathKey(path: string) {
+  const flat = path.replace(/\\/g, '/')
+  const unc = flat.startsWith('//')
+  let normalized = flat.replace(/\/{2,}/g, '/')
+  if (unc && !normalized.startsWith('//')) normalized = `/${normalized}`
+  while (normalized.length > 1 && normalized.endsWith('/') && !/^[A-Za-z]:\/$/.test(normalized)) normalized = normalized.slice(0, -1)
+  return /^[A-Za-z]:\//.test(normalized) || unc ? normalized.toLowerCase() : normalized
+}
+
+async function toolFileReference($: EngineInterface, path: string): Promise<ToolFileReference> {
+  try {
+    const stat = await $.fs.stat(path, { resolve: true })
+    return { path, realPath: stat.realPath, unresolved: stat.realPath === undefined }
+  } catch {
+    try {
+      return { path, unresolved: await $.fs.exists(path) }
+    } catch {
+      return { path, unresolved: true }
+    }
+  }
+}
+
+async function deleteSavedToolFile($: EngineInterface, path: string): Promise<boolean> {
+  const cwd = await $.session.cwd().catch(() => '')
+  const windows = /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\') || /^[A-Za-z]:[\\/]/.test(cwd)
+  let exitCode: number
+  if (windows) {
+    // Keep the path in the child environment so PowerShell never parses it as
+    // part of the command. File.Delete removes one file and never recurses.
+    const result = await $.process.run(
+      ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', 'try { [System.IO.File]::Delete($env:JEV_ROUTER_DELETE_PATH); exit 0 } catch { exit 1 }'],
+      { env: { JEV_ROUTER_DELETE_PATH: path }, timeoutMs: 10000 },
+    )
+    exitCode = result.exitCode
+  } else {
+    // argv execution (no shell) and no recursive flag: this can unlink only
+    // the exact file registered by save_tool.
+    const result = await $.process.run(['rm', '-f', '--', path], { timeoutMs: 10000 })
+    exitCode = result.exitCode
+  }
+  return exitCode === 0 && !(await $.fs.exists(path))
+}
+
+// An entry is eligible only after its index was removed, and only if every
+// remaining project/global index can be read and none still refers to that
+// file. Symlinks, directories and missing paths are not followed or removed.
+async function deleteUnreferencedToolFiles($: EngineInterface, paths: readonly string[]): Promise<SavedToolFileCleanup> {
+  const result = emptyToolFileCleanup()
+  const uniquePaths = [...new Map(paths.map(path => [toolPathKey(path), path])).values()]
+  const candidates = new Map<string, { path: string; realPath: string }>()
+
+  for (const path of uniquePaths) {
+    let stat
+    try {
+      stat = await $.fs.stat(path, { resolve: true })
+    } catch {
+      result.missing++
+      continue
+    }
+    if (stat.kind !== 'file' || stat.isLink || !stat.realPath) {
+      result.protected++
+      continue
+    }
+    const realKey = toolPathKey(stat.realPath)
+    if (!candidates.has(realKey)) candidates.set(realKey, { path, realPath: stat.realPath })
+  }
+
+  let keys: string[]
+  try {
+    keys = await $.store.keys()
+  } catch {
+    result.failed += candidates.size
+    return result
+  }
+  const references: ToolFileReference[] = []
+  let couldNotAudit = false
+  for (const key of keys.filter(k => k === GLOBAL_TOOLS_KEY || k.startsWith(PROJECT_TOOLS_PREFIX))) {
+    try {
+      const kind: Scope = key === GLOBAL_TOOLS_KEY ? 'global' : 'project'
+      for (const tool of readLibrary(await $.store.get(key), kind)) {
+        const reference = await toolFileReference($, tool.path)
+        if (reference.unresolved) couldNotAudit = true
+        references.push(reference)
+      }
+    } catch {
+      couldNotAudit = true
+    }
+  }
+  if (couldNotAudit) {
+    result.failed += candidates.size
+    return result
+  }
+
+  for (const { path, realPath } of candidates.values()) {
+    const pathKey = toolPathKey(path)
+    const realKey = toolPathKey(realPath)
+    if (references.some(ref => toolPathKey(ref.path) === pathKey || (ref.realPath !== undefined && toolPathKey(ref.realPath) === realKey))) {
+      result.shared++
+      continue
+    }
+    try {
+      if (await deleteSavedToolFile($, path)) result.deleted++
+      else result.failed++
+    } catch {
+      result.failed++
+    }
+  }
+  return result
+}
+
+function toolFileCleanupText(result: SavedToolFileCleanup) {
+  return ` Script files: ${result.deleted} deleted, ${result.shared} still referenced, ${result.missing} missing, ${result.protected} skipped (not plain files), ${result.failed} failed.`
+}
+
+// The save_tool call: validate, check the file exists, ask Jev whether it will
+// serve other work (an unreachable Jev does not block a save), then keep it.
+async function saveToolCall($: EngineInterface, input: unknown): Promise<SaveResult> {
+  const config = S.config
+  if (!config.enabled || !config.key || !config.tools.save) return { status: 'unavailable', reason: !config.key ? 'no-key' : 'tool-saving-disabled' }
+  const prepared = prepareTool(input, [config.key])
+  if (!('tool' in prepared)) return prepared
+  const { tool } = prepared
+  if (!(await $.fs.exists(tool.path))) return { status: 'invalid_request', reason: 'path does not exist; write the file to a durable location first.' }
+  if (!S.hiddenLoaded) await loadHidden($)
+  // A tool the person registered under this name is theirs: not asked about, not replaced.
+  const library = await loadTools($)
+  const existing = (tool.scope === 'global' ? library.global : library.project).find(t => t.name === tool.name)
+  if (existing && isUserTool(existing)) return { status: 'declined', reason: 'A tool registered by the user already has this name, so it was not replaced. Use another name.', name: tool.name, scope: tool.scope }
+  let reusable: number | undefined
+  if (config.tools.saveThreshold > 0) {
+    const started = await $.clock.now()
+    try {
+      const reply = await sender($, started + config.timeoutMs)(JSON.stringify({ model: config.model, state: { tool: { name: tool.name, description: tool.description, usage: tool.usage, scope: tool.scope }, note: 'Judged from the description alone; no code or file content is sent.' }, questions: { reusable: saveQuestion(tool) } }))
+      reusable = reply.status >= 200 && reply.status < 300 ? parseReusable(reply.text) : undefined
+    } catch {
+      reusable = undefined
+    }
+  }
+  if (reusable !== undefined && reusable < config.tools.saveThreshold) {
+    await log($, { type: 'tool', action: 'declined', name: tool.name, scope: tool.scope, reusable })
+    return { status: 'declined', reason: 'Jev judged this tool unlikely to serve other work, so it was not saved.', name: tool.name, scope: tool.scope, reusable }
+  }
+  const saved = upsertTool(tool.scope === 'global' ? library.global : library.project, tool, config.tools.max, await $.clock.now())
+  if (saved.refused) return { status: 'declined', reason: saved.refused === 'full' ? 'The list is full of tools registered by the user, so nothing could be dropped to make room.' : 'A tool registered by the user already has this name.', name: tool.name, scope: tool.scope }
+  await writeTools($, tool.scope, saved.list)
+  await log($, { type: 'tool', action: saved.updated ? 'updated' : 'saved', name: tool.name, scope: tool.scope, reusable: reusable ?? null, evicted: saved.evicted ?? null })
+  return { status: saved.updated ? 'updated' : 'saved', name: tool.name, scope: tool.scope, ...(reusable !== undefined ? { reusable } : {}), ...(saved.evicted ? { evicted: saved.evicted } : {}) }
+}
+
+// A shell command that runs a tool suggested this turn counts as a use.
+async function noteToolUse($: EngineInterface, command: string) {
+  const used = S.hintedTools.filter(t => usesTool(command, t))
+  if (used.length === 0) return
+  S.hintedTools = S.hintedTools.filter(t => !used.includes(t))
+  const library = await loadTools($)
+  const now = await $.clock.now()
+  for (const tool of used) {
+    const list = tool.scope === 'global' ? library.global : library.project
+    await writeTools($, tool.scope, touchTool(list, tool.name, now))
+    await log($, { type: 'tool', action: 'used', name: tool.name, scope: tool.scope })
+  }
+}
+
+const toolLine = async ($: EngineInterface, t: SavedTool) => `  ${t.name}${isUserTool(t) ? ' [yours]' : ''} · used ${t.used} · ${t.description} · ${t.usage}${(await $.fs.exists(t.path)) ? '' : ' [file missing]'}`
+
+// /jev-tool add <name> <absolute path> [project|global] <description>: the
+// person's own tool. Not judged by Jev, never cleared in bulk, its file never
+// deleted by the plugin, and not counted against the maximum.
+async function addUserTool($: EngineInterface, args: readonly string[]): Promise<string> {
+  const usage = 'jev-router: /jev-tool add <name> <absolute path> [project|global] <what it does>'
+  const [name, path, ...rest] = args
+  if (!name || !path) return usage
+  const scope = rest[0] === 'project' || rest[0] === 'global' ? rest.shift() as Scope : 'project'
+  const prepared = prepareTool({ name, path, scope, description: rest.join(' '), usage: 'Read the file, then run it as it describes.' }, [S.config.key])
+  if (!('tool' in prepared)) return `jev-router: ${prepared.reason ?? 'invalid tool'}\n${usage}`
+  const { tool } = prepared
+  if (!(await $.fs.exists(tool.path))) return `jev-router: no file at ${tool.path}.`
+  const library = await loadTools($)
+  const saved = upsertTool(tool.scope === 'global' ? library.global : library.project, tool, S.config.tools.max, await $.clock.now(), 'user')
+  await writeTools($, tool.scope, saved.list)
+  await log($, { type: 'tool', action: saved.updated ? 'updated' : 'registered', name: tool.name, scope: tool.scope, origin: 'user' })
+  return `jev-router: ${saved.updated ? 'updated' : 'registered'} ${tool.name} (${tool.scope}). It is yours: bulk clears leave it and its file is never deleted.`
+}
+
+async function toolStatus($: EngineInterface) {
+  const c = S.config.tools
+  const library = await loadTools($)
+  return `tools: selection ${c.routing ? 'on' : 'off'} (suggested at ≥ ${c.threshold}, up to ${c.hints}); Claude may save ${c.save ? 'on' : 'off'} (saved when Jev judges ≥ ${c.saveThreshold} reusable, up to ${c.max} per scope); ${library.project.length} project, ${library.global.length} global. Manage with /jev-tool.`
+}
+
+// /jev-tool: list, show, clear, and the two switches.
+async function toolCommand($: EngineInterface, raw: string): Promise<string> {
+  const rawArgs = raw.trim().split(/\s+/).filter(Boolean)
+  const keepFiles = rawArgs.includes('--keep-files')
+  const deleteFiles = rawArgs.includes('--delete-files')
+  const args = rawArgs.filter(arg => arg !== '--delete-files' && arg !== '--keep-files')
+  const verb = (args[0] ?? 'list').toLowerCase()
+  const scopeArg = (args.at(-1) ?? '').toLowerCase()
+  const scopes: Scope[] = scopeArg === 'project' ? ['project'] : scopeArg === 'global' ? ['global'] : ['project', 'global']
+  if (keepFiles && deleteFiles) return 'jev-router: use either --keep-files or --delete-files, not both.'
+  if ((keepFiles || deleteFiles) && verb !== 'clear') return 'jev-router: file options are available with /jev-tool clear.'
+  if (verb === 'on' || verb === 'off') {
+    const saved = await setOption($, 'tool_routing', verb === 'on')
+    if (saved.includes('is now')) S.config.tools = { ...S.config.tools, routing: verb === 'on' }
+    return saved.includes('is now') ? `jev-router: tool selection is now ${verb} (saved to settings; the plugin reloads).` : saved
+  }
+  if (verb === 'save' && (args[1] === 'on' || args[1] === 'off')) {
+    const saved = await setOption($, 'tool_save', args[1] === 'on')
+    if (saved.includes('is now')) S.config.tools = { ...S.config.tools, save: args[1] === 'on' }
+    return saved.includes('is now') ? `jev-router: letting Claude save tools is now ${args[1]} (saved to settings; the plugin reloads).` : saved
+  }
+  if (verb === 'add') return addUserTool($, args.slice(1))
+  const library = await loadTools($)
+  if (verb === 'list') {
+    const lines = [await toolStatus($)]
+    for (const scope of ['project', 'global'] as const) {
+      const list = scope === 'project' ? library.project : library.global
+      if (list.length === 0) continue
+      lines.push(`${scope}:`)
+      for (const t of list) lines.push(await toolLine($, t))
+    }
+    if (library.project.length + library.global.length === 0) lines.push('No tools saved yet. Claude saves one with save_tool when it notices repeated work; register your own with /jev-tool add.')
+    return lines.join('\n')
+  }
+  if (verb === 'show') {
+    const name = args[1]
+    const t = name ? [...library.project, ...library.global].find(x => x.name === name) : undefined
+    return t ? [`${t.name} (${t.scope}, ${isUserTool(t) ? 'registered by you' : 'saved by an assistant'})`, `description: ${t.description}`, `run: ${t.usage}`, `file: ${t.path}${(await $.fs.exists(t.path)) ? '' : ' [missing]'}`, `used ${t.used} times`].join('\n') : `jev-router: no saved tool named ${name ?? '(none given)'}.`
+  }
+  if (verb === 'clear') {
+    const target = (args[1] ?? '').toLowerCase()
+    if (!target || ['project', 'global'].includes(target) || args.length > 3) return 'jev-router: /jev-tool clear <name | all | missing> [project|global] [--keep-files|--delete-files]'
+    const removed: string[] = []
+    const filePaths: string[] = []
+    for (const scope of scopes) {
+      const list = scope === 'project' ? library.project : library.global
+      let keep = list
+      // all and missing clear only what an assistant saved: the person's own stay.
+      if (target === 'all') keep = list.filter(isUserTool)
+      else if (target === 'missing') {
+        keep = []
+        for (const t of list) if (isUserTool(t) || (await $.fs.exists(t.path))) keep.push(t)
+      } else if (args[1] !== undefined && list.some(t => t.name === args[1])) {
+        // A name clears from the first layer that has it (project first), unless one is named.
+        if (removed.length > 0) continue
+        keep = list.filter(t => t.name !== args[1])
+      }
+      if (keep.length !== list.length) {
+        await writeTools($, scope, keep)
+        removed.push(`${list.length - keep.length} from ${scope}`)
+        const kept = new Set(keep)
+        // A script file is deleted only for what an assistant saved.
+        filePaths.push(...list.filter(t => !kept.has(t) && !isUserTool(t)).map(t => t.path))
+      }
+    }
+    const yours = (target === 'all' || target === 'missing') ? scopes.reduce((n, scope) => n + (scope === 'project' ? library.project : library.global).filter(isUserTool).length, 0) : 0
+    const keptNote = yours > 0 ? ` ${yours} tool${yours === 1 ? '' : 's'} registered by you ${yours === 1 ? 'was' : 'were'} kept.` : ''
+    if (removed.length === 0) return `jev-router: nothing to clear.${keptNote}`
+    const cleanup = keepFiles ? undefined : await deleteUnreferencedToolFiles($, filePaths)
+    return `jev-router: cleared ${removed.join(', ')}.${cleanup ? toolFileCleanupText(cleanup) : ' Script files were kept (--keep-files).'}${keptNote}`
+  }
+  return 'jev-router: /jev-tool list | show <name> | add <name> <path> [project|global] <what it does> | clear <name | all | missing> [project|global] [--keep-files|--delete-files] | on | off | save on|off'
+}
+
+async function clearLearnedData($: EngineInterface) {
+  let removed = 0
+  let failed = 0
+  for (const key of [CAPS_KEY, OUTPUTS_KEY, TURNLEN_KEY]) {
+    try {
+      if ((await $.store.get(key)) !== undefined) {
+        await $.store.delete(key)
+        removed++
+      }
+    } catch {
+      failed++
+    }
+  }
+  S.caps = undefined
+  S.outputs = {}
+  S.turnLengths = []
+  S.autoProbed.clear()
+  S.windows = {}
+  clearConversation('manual-clear')
+  return { removed, failed }
+}
+
+async function clearToolMetadata($: EngineInterface, scope: 'project' | 'global' | 'all', deleteFiles = true) {
+  let keys: string[]
+  try {
+    keys = await $.store.keys()
+  } catch {
+    const files = deleteFiles ? emptyToolFileCleanup() : undefined
+    if (files) files.failed = 1
+    return { registries: 0, entries: 0, kept: 0, failed: 1, files }
+  }
+  const currentProjectKey = scope === 'project' ? await projectToolsKey($) : undefined
+  const targets = keys.filter(key =>
+    scope === 'global' ? key === GLOBAL_TOOLS_KEY
+      : scope === 'project' ? key === currentProjectKey
+        : key === GLOBAL_TOOLS_KEY || key.startsWith(PROJECT_TOOLS_PREFIX),
+  )
+  let registries = 0
+  let entries = 0
+  let kept = 0
+  let failed = 0
+  const filePaths: string[] = []
+  for (const key of targets) {
+    try {
+      const kind: Scope = key === GLOBAL_TOOLS_KEY ? 'global' : 'project'
+      const list = readLibrary(await $.store.get(key), kind)
+      const mine = list.filter(isUserTool)
+      // What an assistant saved goes; what the person registered stays.
+      if (mine.length > 0) await $.store.set(key, mine)
+      else await $.store.delete(key)
+      registries++
+      entries += list.length - mine.length
+      kept += mine.length
+      filePaths.push(...list.filter(t => !isUserTool(t)).map(t => t.path))
+    } catch {
+      failed++
+    }
+  }
+  S.hintedTools = []
+  const files = deleteFiles ? await deleteUnreferencedToolFiles($, filePaths) : undefined
+  return { registries, entries, kept, failed, files }
+}
+
+async function localDataText($: EngineInterface) {
+  const [logs, keys, rawCaps, rawOutputs, rawTurnLengths] = await Promise.all([
+    listLogFiles($), $.store.keys(), $.store.get(CAPS_KEY), $.store.get(OUTPUTS_KEY), $.store.get(TURNLEN_KEY),
+  ])
+  const caps = rawCaps as Caps | undefined
+  const outputs = normalizeStats(rawOutputs)
+  const outputSamples = Object.values(outputs).reduce((sum, rows) => sum + (rows?.length ?? 0), 0)
+  const turnLengths = Array.isArray(rawTurnLengths) ? rawTurnLengths.length : 0
+  let projectTools = 0
+  let globalTools = 0
+  for (const key of keys.filter(k => k === GLOBAL_TOOLS_KEY || k.startsWith(PROJECT_TOOLS_PREFIX))) {
+    const kind: Scope = key === GLOBAL_TOOLS_KEY ? 'global' : 'project'
+    try {
+      const count = readLibrary(await $.store.get(key), kind).length
+      if (kind === 'global') globalTools += count
+      else projectTools += count
+    } catch {
+      // An unreadable library is not counted.
+    }
+  }
+  const logText = logs.available ? `${logs.files.length} dated file(s)` : 'unavailable'
+  return [
+    'jev-router local data:',
+    `logs: ${logText}`,
+    `learned: ${Object.keys(caps?.families ?? {}).length} model families, ${outputSamples} output samples, ${turnLengths} turn lengths`,
+    `saved tool indexes: ${projectTools} project, ${globalTools} global (script files live at their saved paths)`,
+    'Preserved separately: plugin settings and API key.',
+    'Clearing saved-tool indexes covers what assistants saved (a cache) and also deletes their unshared script files; add --keep-files to keep the files. Tools you registered with /jev-tool add are kept by every bulk clear and their files are never deleted; files still referenced by any saved-tool index are preserved.',
+    'Commands: /jev-log clear [today|all] · /jev-data clear logs [today|all] | learned | tools [project|global|all] [--keep-files] | all [--keep-files]',
+  ].join('\n')
+}
+
+async function dataCommand($: EngineInterface, raw: string): Promise<string> {
+  const args = raw.trim().split(/\s+/).filter(Boolean).map(v => v.toLowerCase())
+  if (args.length === 0 || args[0] === 'list' || args[0] === 'status') return localDataText($)
+  if (args[0] !== 'clear') return 'jev-router: /jev-data [status | clear logs [today|all] | clear learned | clear tools [project|global|all] [--keep-files] | clear all [--keep-files]]'
+  const area = args[1]
+  if (area === 'logs') {
+    if (args.length > 3) return 'jev-router: /jev-data clear logs [today|all]'
+    const scope = args[2] ?? 'all'
+    if (scope !== 'today' && scope !== 'all') return 'jev-router: /jev-data clear logs [today|all]'
+    const result = await clearLogs($, scope)
+    return result.failed > 0
+      ? `jev-router: cleared ${result.cleared} ${scope} log file(s); ${result.failed} could not be accessed.`
+      : `jev-router: cleared the contents of ${result.cleared} ${scope} log file(s). Logging will continue if enabled.`
+  }
+  if (area === 'learned') {
+    if (args.length !== 2) return 'jev-router: /jev-data clear learned'
+    const result = await clearLearnedData($)
+    return `jev-router: cleared ${result.removed} learned-data store(s) and this session's routing facts.${result.failed ? ` ${result.failed} store(s) could not be cleared.` : ''}`
+  }
+  if (area === 'tools') {
+    const keepFiles = args.includes('--keep-files')
+    const deleteFiles = args.includes('--delete-files')
+    const positional = args.filter(arg => arg !== '--delete-files' && arg !== '--keep-files')
+    if (keepFiles && deleteFiles) return 'jev-router: use either --keep-files or --delete-files, not both.'
+    if (positional.length > 3 || args.some(arg => arg.startsWith('--') && arg !== '--delete-files' && arg !== '--keep-files')) return 'jev-router: /jev-data clear tools [project|global|all] [--keep-files]'
+    const scope = positional[2] ?? 'all'
+    if (scope !== 'project' && scope !== 'global' && scope !== 'all') return 'jev-router: /jev-data clear tools [project|global|all] [--keep-files]'
+    const result = await clearToolMetadata($, scope, !keepFiles)
+    const scripts = result.files ? toolFileCleanupText(result.files) : ' Script files were kept (--keep-files).'
+    return `jev-router: cleared ${result.entries} saved tool entr${result.entries === 1 ? 'y' : 'ies'} in ${result.registries} ${scope} index(es).${scripts}${result.kept ? ` ${result.kept} tool${result.kept === 1 ? '' : 's'} registered by you ${result.kept === 1 ? 'was' : 'were'} kept.` : ''}${result.failed ? ` ${result.failed} index(es) could not be cleared.` : ''}`
+  }
+  if (area === 'all' && (args.length === 2 || (args.length === 3 && (args[2] === '--keep-files' || args[2] === '--delete-files')))) {
+    const keepFiles = args[2] === '--keep-files'
+    const logs = await clearLogs($, 'all')
+    const learned = await clearLearnedData($)
+    const tools = await clearToolMetadata($, 'all', !keepFiles)
+    return [
+      `jev-router: clear all: logs ${logs.cleared} file(s)${logs.failed ? `, ${logs.failed} failed` : ''}; learned data ${learned.removed} store(s)${learned.failed ? `, ${learned.failed} failed` : ''}; saved tool indexes ${tools.entries} entr${tools.entries === 1 ? 'y' : 'ies'}${tools.failed ? `, ${tools.failed} failed` : ''}${tools.kept ? ` (${tools.kept} registered by you kept)` : ''}.${tools.files ? toolFileCleanupText(tools.files) : ''}`,
+      keepFiles ? 'Plugin settings, the API key, and saved tool script files were kept (--keep-files).' : 'Plugin settings and the API key were kept.',
+    ].join('\n')
+  }
+  return 'jev-router: /jev-data [status | clear logs [today|all] | clear learned | clear tools [project|global|all] [--keep-files] | clear all [--keep-files]]'
+}
+
 function sender($: EngineInterface, deadline: number): Send {
   return async body => {
     const remaining = deadline - (await $.clock.now())
@@ -799,6 +1312,7 @@ function statusText() {
   return [
     `jev-router model routing: ${c.routing} (the cheapest tier/effort Jev judges ≥ ${c.feasibleThreshold} feasible, the likeliest among those within ${Math.round(c.cost.tolerance * 100)}% of its cost; costed over ${horizonNow().horizon} requests (${horizonNow().source}); fallback ${c.fallback} when Jev gives no answer)`,
     `skill selection: ${c.skillRouting ? 'on' : 'off'} (gate ≥ ${c.gateThreshold}, fits ≥ ${c.fitsThreshold}, shortlist ${c.shortlist}, load mode ${c.mode})`,
+    `saved tools: selection ${c.tools.routing ? 'on' : 'off'}, saving ${c.tools.save ? 'on' : 'off'} (see /jev-tool)`,
     `decision routing: ${c.decisionRouting ? 'on' : 'off'} (assistant-owned judgments only; confidence threshold ${c.decisionConfidence})`,
     `models from this Claude Code (${S.available.source}): ${fams}`,
     `log: ${c.writeLog ? 'on' : 'off'}`,
@@ -809,7 +1323,7 @@ function statusText() {
     `Jev context: recent excerpts ${c.awareness.enabled ? 'on' : 'off'} (${c.awareness.messages} messages, ${c.awareness.maxChars} chars)`,
     last,
     ...(S.lastStep ? [cacheText(S.lastStep)] : []),
-    'commands: /jev-model on | dry-run | off (model routing) | skills on | off | cache | fallback <session|haiku|sonnet|opus> | settings | set | unset | defaults | probe | reset | models',
+    'commands: /jev-model on | dry-run | off (model routing) | skills on | off | cache | fallback <session|haiku|sonnet|opus> | settings | set | unset | defaults | probe | reset | models · /jev-log [clear] · /jev-data',
   ].join('\n')
 }
 
@@ -838,8 +1352,18 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     await checkSession($)
-    await $.command.register({ name: 'jev-log', description: 'Show the last Jev router rounds and steps' })
+    await $.command.register({ name: 'jev-log', description: 'Show recent Jev router rounds and clear local logs', argumentHint: '[clear [today|all]]' })
+    await $.command.register({
+      name: 'jev-data',
+      description: 'Inspect or clear Jev router logs and local learned data',
+      argumentHint: '[status | clear logs [today|all] | clear learned | clear tools [project|global|all] [--keep-files] | clear all [--keep-files]]',
+    })
     await $.command.register({ name: 'jev-index', description: 'Show the skills the Jev router can pick from' })
+    await $.command.register({
+      name: 'jev-tool',
+      description: 'Saved tools Jev can suggest: list, show, clear, switches',
+      argumentHint: 'list | show <name> | add <name> <path> [project|global] <what it does> | clear <name|all|missing> [project|global] [--keep-files] | on | off | save on|off',
+    })
     await $.command.register({
       name: 'jev-model',
       description: 'Jev routing: status, model on/dry-run/off, skills on/off, cache, fallback, settings, set, unset, defaults, probe, reset, models',
@@ -857,6 +1381,9 @@ export const register: Register = (on, options) => {
     await refreshModels($)
     await loadCaps($)
     await loadHidden($)
+    if (config.enabled && config.key && config.tools.save) {
+      await $.tool.register({ name: 'save_tool', description: SAVE_DESCRIPTION, inputSchema: SAVE_SCHEMA, isDeferred: false })
+    }
     if (config.enabled && config.key && config.decisionRouting) {
       await $.tool.register({ name: 'decide', description: DECISION_DESCRIPTION, inputSchema: DECISION_SCHEMA, isDeferred: false })
     }
@@ -883,10 +1410,29 @@ export const register: Register = (on, options) => {
   // after compaction. Only add it to prompts actually offering the tool.
   on('prompt.compose', async ($, e, next) => {
     const result = await next(e)
-    if (!config.enabled || !config.key || !config.decisionRouting || !e.tools.includes(DECISION_TOOL)) return result
-    const id = 'jev-router:decisions'
-    return { ...result, sections: [...result.sections.filter(s => s.id !== id), { id, text: DECISION_INSTRUCTIONS, scope: 'session' as const }] }
+    if (!config.enabled || !config.key) return result
+    let sections = result.sections
+    const add = (id: string, text: string) => {
+      sections = [...sections.filter(s => s.id !== id), { id, text, scope: 'session' as const }]
+    }
+    if (config.decisionRouting && e.tools.includes(DECISION_TOOL)) add('jev-router:decisions', DECISION_INSTRUCTIONS)
+    if (config.tools.save && e.tools.includes(SAVE_TOOL)) add('jev-router:tools', SAVE_INSTRUCTIONS)
+    return sections === result.sections ? result : { ...result, sections }
   }).catch(($, e, next) => next(e))
+
+  on('tool.call', { tool: 'mcp__jev-router__save_tool' }, async ($, e) => {
+    const result = await saveToolCall($, { name: e.name, description: e.description, usage: e.usage, path: e.path, scope: e.scope })
+    return { result: saveText(result) }
+  }).catch(() => ({ result: saveText({ status: 'unavailable', reason: 'tool-hook-failed' }) }))
+
+  // A saved tool the shell ran counts as a use.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const result = await next(e)
+    if (S.hintedTools.length > 0 && result.deny === undefined && result.isError !== true) await noteToolUse($, String((e as { command?: unknown }).command ?? ''))
+    return result
+  }).catch(($, e, next) => next(e))
+
+  on('command.run', { command: 'jev-tool' }, async ($, e) => ({ text: await toolCommand($, e.args) }))
 
   on('tool.call', { tool: 'mcp__jev-router__decide' }, async ($, e) => {
     const input = { decision_owner: e.decision_owner, authority: e.authority, state: e.state, questions: e.questions }
@@ -948,6 +1494,7 @@ export const register: Register = (on, options) => {
     if (!midTurn) {
       await finishRound($, 'superseded')
       S.nextDecision = undefined
+      S.hintedTools = []
     }
 
     const skip = (reason: string) => log($, { type: 'round', ...base, outcome: 'skipped', reason }).then(() => next(e))
@@ -963,14 +1510,19 @@ export const register: Register = (on, options) => {
     const deadline = started + config.timeoutMs
     // Skill selection off: no index is built and no skill is asked about.
     const skills = config.skillRouting ? (await ensureIndex($)).skills : []
+    // Saved tools Jev may pick from: the project's and the global ones, a
+    // project tool hiding a global one of the same name.
+    const library = config.tools.routing ? await loadTools($) : undefined
+    const toolOptions = library ? mergeTools(library.project, library.global) : []
     if (S.available.source === 'not-read') await refreshModels($)
     if (!S.version) await loadCaps($)
-    const sent = scrubText(text, [config.key]).slice(0, config.maxPromptChars)
+    // The prompt, then the conversation excerpts, share one state budget Jev can take.
+    const sent = scrubText(text, [config.key]).slice(0, Math.min(config.maxPromptChars, STATE_CHAR_BUDGET - STATE_RESERVE))
     let messages
     if (config.awareness.enabled && config.awareness.maxChars > 0) {
       try { messages = await $.session.messages() } catch { /* unknown; never reuse another session's transcript */ }
     }
-    const recent = recentContext(messages, text, config.awareness, [config.key])
+    const recent = recentContext(messages, text, { ...config.awareness, maxChars: Math.min(config.awareness.maxChars, Math.max(0, STATE_CHAR_BUDGET - STATE_RESERVE - sent.length)) }, [config.key])
     if (config.routing !== 'off') await readContext($)
     // Before any response was seen (a fresh session, a plugin reload), the
     // session model stands in for the current one so context costs are known.
@@ -991,6 +1543,7 @@ export const register: Register = (on, options) => {
         modelDescriptions: config.modelDescriptions,
         recentContext: recent.text,
         routingContext: facts,
+        tools: toolOptions,
       },
       sender($, deadline),
       () => $.clock.now(),
@@ -1033,6 +1586,18 @@ export const register: Register = (on, options) => {
       if (!midTurn) S.pending = { id, selected: result.selected.map(s => s.name), delivery, loaded: new Set() }
     }
 
+    // A tool Jev picked is suggested only if its file is still there.
+    const pickedTools: { tool: SavedTool; probability: number }[] = []
+    let staleTools = 0
+    for (const p of pickTools(result.tools, toolOptions, config.tools.threshold, config.tools.hints)) {
+      if (await $.fs.exists(p.tool.path)) pickedTools.push(p)
+      else staleTools++
+    }
+    if (pickedTools.length > 0) {
+      context.push(toolHint(pickedTools))
+      if (!midTurn) S.hintedTools = pickedTools.map(p => p.tool)
+    }
+
     await log($, {
       type: 'round',
       ...base,
@@ -1040,6 +1605,7 @@ export const register: Register = (on, options) => {
       sent_chars: sent.length,
       index_size: skills.length,
       skill_routing: config.skillRouting,
+      tools: toolOptions.length > 0 ? { options: toolOptions.length, none: result.tools?.none ?? null, picked: pickedTools.map(p => ({ name: p.tool.name, scope: p.tool.scope, probability: p.probability })), stale: staleTools } : undefined,
       mode: config.mode,
       outcome: result.outcome,
       reason: result.reason,
@@ -1439,10 +2005,22 @@ export const register: Register = (on, options) => {
       S.pendingProbe = undefined
       return { text: 'jev-router: probe disarmed.' }
     }
-    return { text: statusText() }
+    return { text: `${statusText()}\n${await toolStatus($)}` }
   })
 
-  on('command.run', { command: 'jev-log' }, async $ => {
+  on('command.run', { command: 'jev-log' }, async ($, e) => {
+    const args = e.args.trim().toLowerCase().split(/\s+/).filter(Boolean)
+    if (args[0] === 'clear') {
+      const scope = args[1] ?? 'today'
+      if ((scope !== 'today' && scope !== 'all') || args.length > 2) return { text: 'jev-router: /jev-log [clear [today|all]]' }
+      const result = await clearLogs($, scope)
+      return {
+        text: result.failed > 0
+          ? `jev-router: cleared ${result.cleared} ${scope} log file(s); ${result.failed} could not be accessed.`
+          : `jev-router: cleared the contents of ${result.cleared} ${scope} log file(s). Logging will continue if enabled.`,
+      }
+    }
+    if (args.length > 0) return { text: 'jev-router: /jev-log [clear [today|all]]' }
     const file = await logFile($)
     if (!file || !(await $.fs.exists(file))) {
       return { text: S.config.writeLog ? 'jev-router: nothing logged today.' : 'jev-router: logging is off. Turn on "Write log" in the plugin settings to record rounds and steps.' }
@@ -1475,6 +2053,8 @@ export const register: Register = (on, options) => {
     })
     return { text: [`jev-router log: ${file}`, ...rows].join('\n') }
   })
+
+  on('command.run', { command: 'jev-data' }, async ($, e) => ({ text: await dataCommand($, e.args) }))
 
   on('command.run', { command: 'jev-index' }, async $ => {
     S.index = undefined

@@ -23,6 +23,10 @@ export const SHARED: Record<string, Spec> = {
   // On the settings page.
   feasibility_threshold: { where: 'page', kind: 'number', default: 0.6, min: 0, max: 1, what: 'A tier at an effort counts as able to do the work when Jev judges it at least this likely to complete it; the cheapest such pair runs' },
   jev_context_enabled: { where: 'page', kind: 'boolean', default: true, what: 'Send Jev short excerpts of recent conversation so follow-ups are judged in context' },
+  tool_routing: { where: 'page', kind: 'boolean', default: true, what: 'Jev suggests a saved tool (a script an assistant wrote for earlier work) when a request looks like work it already did' },
+  tool_save: { where: 'page', kind: 'boolean', default: true, what: 'Let Claude save tools it writes for repeatable work, with save_tool' },
+  tool_threshold: { where: 'page', kind: 'number', default: 0.5, min: 0, max: 1, what: 'A saved tool is suggested when Jev puts at least this probability on it (a Choice among the saved tools and none)' },
+  tool_save_threshold: { where: 'page', kind: 'number', default: 0.5, min: 0, max: 1, what: 'A tool is saved when Jev judges at least this likely that it serves other work; 0 saves without asking Jev' },
   decision_routing: { where: 'page', kind: 'boolean', default: true, what: 'Let Claude automatically submit assistant-owned typed decisions to Jev throughout a task' },
 
   // In $.store, set with /jev-model set.
@@ -35,10 +39,12 @@ export const SHARED: Record<string, Spec> = {
   cache_ttl: { where: 'store', kind: 'choice', default: 'auto', options: ['auto', '5m', '1h'], what: 'Cache lifetime assumed in costs (auto: what responses show, else 1h on a subscription, else 5m); changes no request' },
   cost_horizon: { where: 'store', kind: 'number', default: 0, min: 0, max: 100, integer: true, what: 'Requests each pair is costed over: the first (a cache rebuild on a model switch) plus the later ones. 0: the median requests per turn of recent turns (5 until three turns are seen)' },
   cost_tolerance: { where: 'store', kind: 'number', default: 0.03, min: 0, max: 0.5, what: 'Feasible pairs costing within this share of the cheapest compete on feasibility: the likeliest runs. 0: the cheapest always runs' },
+  tool_max: { where: 'store', kind: 'number', default: 50, min: 1, max: 200, integer: true, what: 'Most saved tools per scope (project, global); past it the least recently used is dropped' },
+  tool_hints: { where: 'store', kind: 'number', default: 3, min: 1, max: 5, integer: true, what: 'Most saved tools suggested for one request' },
   auto_probe: { where: 'store', kind: 'boolean', default: true, what: 'Probe models automatically: on first use (no learned ids on this Claude Code) and after a routed request fails' },
   decision_confidence_threshold: { where: 'store', kind: 'number', default: 0.6, min: 0.5, max: 1, what: 'Decision answers below this are uncertain: Choice/Score confidence, or Noul probability of the likelier yes/no outcome' },
-  jev_context_chars: { where: 'store', kind: 'number', default: 2000, min: 0, max: 8000, integer: true, what: 'Most characters of recent conversation sent to Jev; 0 sends none' },
-  jev_context_messages: { where: 'store', kind: 'number', default: 6, min: 1, max: 12, integer: true, what: 'Most recent user/assistant messages those excerpts come from' },
+  jev_context_chars: { where: 'store', kind: 'number', default: 12000, min: 0, max: 20000, integer: true, what: 'Most characters of recent conversation sent to Jev (also held to what the request leaves of a 24000-character state budget); 0 sends none' },
+  jev_context_messages: { where: 'store', kind: 'number', default: 16, min: 1, max: 40, integer: true, what: 'Most recent user/assistant messages those excerpts come from' },
 }
 
 const text = (v: unknown) => (typeof v === 'string' && v.trim() && v.trim().length <= 500 ? v.trim() : undefined)
@@ -68,6 +74,14 @@ export const parseSetting = (name: string, raw: string): string | number | boole
 export const sharedConfig = (page: Record<string, unknown>, store: Record<string, unknown> = {}) => {
   const v = (name: string) => settingValue(page, name, store)
   return {
+    tools: {
+      routing: v('tool_routing') as boolean,
+      save: v('tool_save') as boolean,
+      threshold: v('tool_threshold') as number,
+      saveThreshold: v('tool_save_threshold') as number,
+      max: v('tool_max') as number,
+      hints: v('tool_hints') as number,
+    },
     decisionRouting: v('decision_routing') as boolean,
     decisionConfidence: v('decision_confidence_threshold') as number,
     feasibleThreshold: v('feasibility_threshold') as number,
