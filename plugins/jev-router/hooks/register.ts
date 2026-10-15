@@ -228,6 +228,10 @@ const S: {
   hintedTools: SavedTool[]
   // The model line of the latest message, for the status line a consult completes.
   chosenModel: string
+  // Consult mode: the skills and saved tools Jev has returned for the work of this
+  // message; any other is refused until a consult returns it. `open` when Jev
+  // could not be reached, so nothing is refused.
+  approved: { skills: Set<string>; tools: Set<string>; open: boolean }
   writes: Promise<void>
   roundSeq: number
   available: Available
@@ -274,6 +278,7 @@ const S: {
   probeQueue: [],
   hintedTools: [],
   chosenModel: '',
+  approved: { skills: new Set(), tools: new Set(), open: false },
   probeAgents: new Set(),
   autoProbed: new Set(),
   turnProbes: new Map(),
@@ -1244,6 +1249,8 @@ async function consultCall($: EngineInterface, input: unknown): Promise<ConsultR
     () => $.clock.now(),
   )
   if (result.outcome === 'error') {
+    // Jev could not be reached: nothing is refused until it can be.
+    S.approved.open = true
     await consultNotice($, 'skill unavailable · tool unavailable')
     await log($, { type: 'consult', outcome: 'error', reason: result.reason, task_chars: sent.length, jev_calls: result.calls, total_ms: (await $.clock.now()) - started })
     return { status: 'unavailable', reason: result.reason ?? 'jev failure' }
@@ -1255,6 +1262,8 @@ async function consultCall($: EngineInterface, input: unknown): Promise<ConsultR
   // The same bookkeeping as a hint: a picked skill's load and a picked tool's use are noted.
   S.pending = result.selected.length > 0 ? { id: `consult-${started.toString(36)}`, selected: result.selected.map(s => s.name), delivery: Object.fromEntries(result.selected.map(s => [s.name, 'hint' as const])), loaded: new Set() } : undefined
   S.hintedTools = pickedTools.map(p => p.tool)
+  for (const s of result.selected) S.approved.skills.add(s.name)
+  for (const p of pickedTools) S.approved.tools.add(p.tool.name)
   await log($, {
     type: 'consult',
     outcome: result.selected.length + pickedTools.length > 0 ? 'picked' : 'nothing_fits',
@@ -1583,6 +1592,16 @@ export const register: Register = (on, options) => {
 
   // A saved tool the shell ran counts as a use.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    // Consult mode: a saved tool Jev has not returned for this work is not run.
+    if ((e as { agentId?: string }).agentId === undefined && config.enabled && config.key && config.selectionMode === 'consult' && config.tools.routing && !S.approved.open) {
+      const library = await loadTools($)
+      const command = String((e as { command?: unknown }).command ?? '')
+      const unapproved = mergeTools(library.project, library.global).find(t => usesTool(command, t) && !S.approved.tools.has(t.name))
+      if (unapproved) {
+        await log($, { type: 'consult', outcome: 'denied', kind: 'tool', name: unapproved.name })
+        return { deny: `jev-router: Jev has not returned the saved tool ${unapproved.name} for this work. Call ${CONSULT_TOOL} with a one-sentence task, then run only a saved tool it returns.` }
+      }
+    }
     const result = await next(e)
     if (S.hintedTools.length > 0 && result.deny === undefined && result.isError !== true) await noteToolUse($, String((e as { command?: unknown }).command ?? ''))
     return result
@@ -1651,6 +1670,7 @@ export const register: Register = (on, options) => {
       await finishRound($, 'superseded')
       S.nextDecision = undefined
       S.hintedTools = []
+      S.approved = { skills: new Set(), tools: new Set(), open: false }
     }
 
     const skip = (reason: string) => log($, { type: 'round', ...base, outcome: 'skipped', reason }).then(() => next(e))
@@ -2067,6 +2087,12 @@ export const register: Register = (on, options) => {
   // A skill the Skill tool loaded: the tool call runs for every invocation,
   // in every surface, so it is the dependable signal.
   on('tool.call', { tool: 'Skill' }, async ($, e, next) => {
+    // Consult mode: a skill Jev has not returned for this work is refused, and
+    // the refusal says what to do. Subagents are not held to it.
+    if ((e as { agentId?: string }).agentId === undefined && config.enabled && config.key && config.selectionMode === 'consult' && config.skillRouting && !S.approved.open && ![...S.approved.skills].some(name => sameSkill(name, String(e.skill)))) {
+      await log($, { type: 'consult', outcome: 'denied', kind: 'skill', name: String(e.skill) })
+      return { deny: `jev-router: Jev has not returned the skill ${String(e.skill)} for this work. Call ${CONSULT_TOOL} with a one-sentence task, then use only a skill it returns.` }
+    }
     const result = await next(e)
     if (result.deny === undefined && result.isError !== true) await noteLoad($, e.skill, 'tool.call:Skill')
     return result

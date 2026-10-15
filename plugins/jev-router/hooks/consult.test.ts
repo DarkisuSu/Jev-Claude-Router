@@ -202,3 +202,85 @@ describe('the skill list the engine adds', () => {
     expect(dropped).toContain('prompt.attachment')
   })
 })
+
+describe('every skill and saved tool during the work goes through Jev', () => {
+  const OPTS = { ...CONSULT, tool_save_threshold: 0 }
+  const skill = ($: Engine, name: string, extra: Record<string, unknown> = {}) => $.tool.call({ tool: 'Skill', skill: name, ...extra } as never)
+  const bash = ($: Engine, command: string) => $.tool.call({ tool: 'Bash', command } as never)
+  const refused = (r: unknown) => JSON.stringify(r).includes('Jev has not returned')
+  const beneathTools = (on: Parameters<typeof memoryStore>[0]) => {
+    on('tool.call', { tool: 'Skill' }, () => ({ result: 'loaded' }) as never)
+    on('tool.call', { tool: 'Bash' }, () => ({ result: 'ran' }) as never)
+  }
+
+  test('a skill is refused until a consult returns it, and the refusal says to consult', { options: OPTS }, async ($, on) => {
+    mock.clock(on); memoryStore(on); beneathTools(on)
+    const w = world(on, jevFor())
+    const before = await skill($, 'speckit-specify')
+    expect(refused(before)).toBe(true)
+    expect(JSON.stringify(before)).toContain(CONSULT_TOOL)
+    expect(logLines(w).find(l => l.type === 'consult' && l.outcome === 'denied')).toMatchObject({ kind: 'skill', name: 'speckit-specify' })
+    await consult($)
+    expect(refused(await skill($, 'speckit-specify'))).toBe(false)
+    // Only what Jev returned.
+    expect(refused(await skill($, 'speckit-plan'))).toBe(true)
+  })
+  test('a later consult in the same work adds to what is allowed', { options: OPTS }, async ($, on) => {
+    mock.clock(on); memoryStore(on); beneathTools(on)
+    world(on, jevFor())
+    await consult($)
+    expect(refused(await skill($, 'speckit-plan'))).toBe(true)
+    // Jev answers the same ranking; the point is that the allowed set only grows within the work.
+    await consult($, 'plan the next step')
+    expect(refused(await skill($, 'speckit-specify'))).toBe(false)
+  })
+  test('a new message starts again: nothing is allowed until it is consulted about', { options: OPTS }, async ($, on) => {
+    mock.clock(on); memoryStore(on); beneathTools(on)
+    world(on, jevFor())
+    await begin($, 't1')
+    await consult($)
+    expect(refused(await skill($, 'speckit-specify'))).toBe(false)
+    await begin($, 't2')
+    expect(refused(await skill($, 'speckit-specify'))).toBe(true)
+  })
+  test('a message typed during the turn does not start again', { options: OPTS }, async ($, on) => {
+    mock.clock(on); memoryStore(on); beneathTools(on)
+    world(on, jevFor())
+    await begin($, 't1')
+    await consult($)
+    await $.prompt.submit({ text: 'and one more thing', asUser: true, turnId: 't1' } as never)
+    expect(refused(await skill($, 'speckit-specify'))).toBe(false)
+  })
+  test('with Jev unreachable nothing is refused', { options: OPTS }, async ($, on) => {
+    mock.clock(on); memoryStore(on); beneathTools(on)
+    world(on, jevFor({ fail: true }))
+    expect(outcome(await consult($)).status).toBe('unavailable')
+    expect(refused(await skill($, 'speckit-plan'))).toBe(false)
+    expect(refused(await bash($, 'python ' + FILE))).toBe(false)
+  })
+  test('a saved tool is not run until a consult returns it; other commands are untouched', { options: OPTS }, async ($, on) => {
+    mock.clock(on); memoryStore(on); beneathTools(on)
+    const w = world(on, jevFor({ tool: { none: 0.1, csv_to_json: 0.9 } }))
+    await saved($, w)
+    expect(refused(await bash($, 'ls -la'))).toBe(false)
+    expect(refused(await bash($, 'python ' + FILE + ' in.csv out.json'))).toBe(true)
+    expect(logLines(w).find(l => l.type === 'consult' && l.outcome === 'denied' && l.kind === 'tool')).toMatchObject({ name: 'csv_to_json' })
+    await consult($)
+    expect(refused(await bash($, 'python ' + FILE + ' in.csv out.json'))).toBe(false)
+  })
+  test('a subagent is not held to it', { options: OPTS }, async ($, on) => {
+    mock.clock(on); memoryStore(on); beneathTools(on)
+    world(on, jevFor())
+    expect(refused(await skill($, 'speckit-plan', { agentId: 'sub-1' }))).toBe(false)
+  })
+  test('prehint refuses nothing', { options: { ...OPTS, selection_mode: 'prehint' } }, async ($, on) => {
+    mock.clock(on); memoryStore(on); beneathTools(on)
+    world(on, jevFor())
+    expect(refused(await skill($, 'speckit-plan'))).toBe(false)
+  })
+  test('with skill selection off no skill is refused', { options: { ...OPTS, skill_routing: false } }, async ($, on) => {
+    mock.clock(on); memoryStore(on); beneathTools(on)
+    world(on, jevFor())
+    expect(refused(await skill($, 'speckit-plan'))).toBe(false)
+  })
+})
