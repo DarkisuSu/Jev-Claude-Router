@@ -44,16 +44,6 @@
       "description": "Expose the decide tool and instruct Claude to send narrow assistant-owned decisions to api.typesafe.ai with relevant task evidence. User choices, preferences and authorization stay with the user. Each tool call makes a separate Jev request; no actions are executed by the tool.\nDefault: on",
       "default": true
     },
-    "mode": {
-      "type": "string",
-      "title": "Skill · Load mode",
-      "description": "hint: suggest the skill so Claude loads it with the Skill tool. inject: add its SKILL.md text directly (not a native activation).\nDefault: hint",
-      "options": [
-        "hint",
-        "inject"
-      ],
-      "default": "hint"
-    },
     "gate_threshold": {
       "type": "number",
       "title": "Skill · Gate threshold",
@@ -65,10 +55,10 @@
     "fits_threshold": {
       "type": "number",
       "title": "Skill · Fits threshold",
-      "description": "Every shortlisted skill whose fit reaches this is suggested, with no count limit. The Skill Suggestion cookbook value.\nDefault: 0.3",
+      "description": "Every shortlisted skill whose fit reaches this is suggested, with no count limit. In the logs, skills that clearly fit scored 0.69 and up and unrelated ones 0.4 and below.\nDefault: 0.5",
       "min": 0,
       "max": 1,
-      "default": 0.3
+      "default": 0.5
     },
     "skill_trim_hint": {
       "type": "boolean",

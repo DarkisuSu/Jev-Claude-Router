@@ -8,8 +8,6 @@ export const ENDPOINT = 'https://api.typesafe.ai/v1/systemone'
 
 // How many ranked skills request 2 rereads by default (the cookbook's SHORTLIST).
 export const SHORTLIST = 3
-// How much of a SKILL.md body each shortlisted skill shows (EXCERPT_CHARS).
-export const EXCERPT_CHARS = 700
 // A Choice takes at most 255 options.
 export const MAX_CHOICE_OPTIONS = 255
 // Index descriptions are cut here so request 1 stays small.

@@ -1,8 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { SAVE_INSTRUCTIONS, SAVE_TOOL, isUserTool, mergeTools, parseReusable, bestTool, prepareTool, readLibrary, toolHint, touchTool, upsertTool, usesTool, type SavedTool } from './tools'
-import { DECISION_INSTRUCTIONS, DECISION_TOOL } from './decisions'
+import { SAVE_TOOL, isUserTool, mergeTools, parseReusable, bestTool, prepareTool, readLibrary, toolHint, touchTool, upsertTool, usesTool, type SavedTool } from './tools'
 import { saveQuestion, toolQuestion } from './questions'
 import { rankWideBody, route } from './router'
 import { FAKE_KEY, logLines, memoryStore, PROMPT, rankWide, rerank, world, type World } from './testkit'
@@ -245,30 +244,23 @@ describe('save_tool', () => {
     const key = Object.keys(stored).find(k => k.startsWith('tools:project:'))!
     expect((stored[key] as { name: string }[]).map(t => t.name).sort()).toEqual(['b', 'c'])
   })
-  test('with saving off the tool is not registered, answers unavailable, and no policy is added', { options: { ...OPTS, tool_save: false } }, async ($, on) => {
+  test('with saving off the tool is not registered and answers unavailable', { options: { ...OPTS, tool_save: false } }, async ($, on) => {
     mock.clock(on); memoryStore(on)
     const w = world(on, jevFor({})); withFile(w)
     const registered: string[] = []
     on('tool.register', (_, e) => { registered.push(e.name); return { value: { tool: e.name } } as never })
     on('session.start', (_, e) => ({ cwd: e.cwd }))
-    on('prompt.compose', () => ({ sections: [] }))
     await $.session.start({ cwd: 'C:/fakeproject' } as never)
     expect(registered).not.toContain('save_tool')
-    expect((await $.prompt.compose({ model: 'm', promptModel: 'm', tools: [SAVE_TOOL], surfaces: [], outputStyle: null, traits: [] } as never)).sections).toHaveLength(0)
     expect(result(await save($)).status).toBe('unavailable')
   })
-  test('with saving on it is registered, and its policy sits beside the decision policy', { options: { ...OPTS, tool_save: true } }, async ($, on) => {
+  test('with saving on it is registered', { options: { ...OPTS, tool_save: true } }, async ($, on) => {
     mock.clock(on); memoryStore(on); world(on, jevFor({}))
     const registered: string[] = []
     on('tool.register', (_, e) => { registered.push(e.name); return { value: { tool: e.name } } as never })
     on('session.start', (_, e) => ({ cwd: e.cwd }))
-    on('prompt.compose', () => ({ sections: [] }))
     await $.session.start({ cwd: 'C:/fakeproject' } as never)
     expect(registered).toContain('save_tool')
-    const composed = await $.prompt.compose({ model: 'm', promptModel: 'm', tools: [SAVE_TOOL, DECISION_TOOL], surfaces: [], outputStyle: null, traits: [] } as never)
-    expect(composed.sections.map(s => [s.id, s.text])).toEqual([['jev-router:decisions', DECISION_INSTRUCTIONS], ['jev-router:tools', SAVE_INSTRUCTIONS]])
-    const noTool = await $.prompt.compose({ model: 'm', promptModel: 'm', tools: [], surfaces: [], outputStyle: null, traits: [] } as never)
-    expect(noTool.sections).toHaveLength(0)
   })
 })
 

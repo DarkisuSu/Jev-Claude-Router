@@ -13,29 +13,26 @@ Release installation: `/plugin install jev-router --marketplace DarkisuSu/Jev-Cl
 
 ## Skill routing
 
-1. **Index.** The router reads its skill list from `$.command.list()`, keeping only user and plugin entries. It adds SKILL.md text from the project's `.claude/skills` folders, `~/.claude/skills` (synced skills included) and installed plugins. Run `/jev-index` to see the list.
+1. **Index.** The router reads its skill list from `$.command.list()`, keeping only user and plugin entries. It adds each skill's full description from its SKILL.md in the project's `.claude/skills` folders, `~/.claude/skills` (synced skills included) and installed plugins. Run `/jev-index` to see the list.
 2. **rank_wide.** One Choice question ranks every skill. Two separate yes/no (Noul) questions open the gate, each answered over the skills listed in the state (`available_skills`): does the request itself name a skill, command, tool or workflow (`names_a_workflow`), and does a listed skill do what it asks (`catalog_has_match`). The larger answer is the gate score; if it is below `gate_threshold` (0.5) the result is no match. Asking about the installed skills, rather than about the kind of task, is what lets a request like "plan this with speckit" through.
-3. **rerank.** The top `shortlist_size` skills (3, the cookbook's value) are judged again, each with its own `fits::<name>` Noul.
-4. **Select.** The fits threshold (`fits_threshold`, 0.3) is the confidence cut-off: every shortlisted skill that reaches it is recommended, best first, with no count limit. TypeSafe publishes no general default and advises tuning thresholds on your own data; the gate's 0.5 is the point where yes and no are equally likely.
+3. **rerank.** The top `shortlist_size` skills (3, the cookbook's value) are judged again, each with its own `fits::<name>` Noul. Jev reads only each skill's name and full description, never the SKILL.md body; saved tools are described to Jev the same way, by name and description.
+4. **Select.** The fits threshold (`fits_threshold`, 0.5) is the confidence cut-off: every shortlisted skill that reaches it is recommended, best first, with no count limit. TypeSafe publishes no general default and advises tuning thresholds on your own data; the gate's 0.5 is the point where yes and no are equally likely.
 
 **No match, error, timeout or no key:** the prompt goes on with nothing added, so Claude's own skill behaviour stands.
 
 **Switching it off.** `Skill selection` on the settings page (or `/jev-model skills on|off`) is separate from model routing. Off, the skill index is not built, no skill is ranked, gated or suggested, and the prompt-time request to Jev carries the model questions alone (the round's reason is `skill-routing-off`). With model routing off as well, there is no prompt-time Jev call; the decision tool can still make its own calls. `Router enabled` stops all three features.
 
-**Load modes:**
+**What Claude is given.** Jev only filters; reading a skill is left to Claude Code. The prompt gets a `<skill_relevance>` block with the name and description of each skill Jev kept, and says they are the result of that screening, not the full list. This is what Claude Code's own skill listing shows, narrowed to the skills Jev chose; Claude still decides, and loads the one that fits natively with the Skill tool.
 
-- `hint`: adds a `<skill_relevance>` block. Claude loads the skill natively with the Skill tool if it agrees.
-- `inject`: adds the SKILL.md text in a block marked `activation="injected-not-native"`. This is not a native activation.
-
-**Load tracking:** a `tool.call` hook on the Skill tool records real native loads, with `skill.prompt` as a second source. Each turn's log entry marks every routed skill `native-loaded`, `injected` or `not-loaded`.
+**Load tracking:** a `tool.call` hook on the Skill tool records real native loads, with `skill.prompt` as a second source. Each turn's log entry marks every routed skill `native-loaded` or `not-loaded`.
 
 ## How a skill or a saved tool reaches Claude
 
-Jev picks while the prompt is sent (the `prompt.submit` hook), and the picks ride beside the message: `<skill_relevance>` and `<tool_relevance>` blocks, or the SKILL.md text itself under `inject` (see Load mode above). Model and effort are chosen in the same request. Nothing depends on Claude calling anything, and nothing is refused: Jev screens every user message before Claude sees it, so Claude gets the result, not the list. Skill selection and saved-tool selection each work this way whenever they are on.
+Jev picks while the prompt is sent (the `prompt.submit` hook), and the picks ride beside the message: `<skill_relevance>` and `<tool_relevance>` blocks (names and descriptions of what Jev kept). Model and effort are chosen in the same request. Nothing depends on Claude calling anything, and nothing is refused: Jev screens every user message before Claude sees it, so Claude gets the result, not the list. Skill selection and saved-tool selection each work this way whenever they are on.
 
 The status line names what was chosen, for example `jev: model sonnet/high · skill speckit-plan · tool csv_to_json` (always all three: a skill or tool not chosen reads `none`, a switched-off one `off`; the same line is added to the conversation as a notice the model does not read, unless `chat_notice` is off).
 
-**`/jev-skills`** cuts a project's skills down to their names in the listing Claude Code sends Claude (the descriptions are most of its tokens): `hide all` (or names) sets `skillOverrides` to `name-only` for them in the project's `.claude/settings.local.json` (the folder the session started in; the file is yours, usually kept out of Git), `show` takes back only what it set. Jev still ranks them by their full SKILL.md description, read from the files; Claude sees a name until Jev picks one and `inject` hands over the text. The skills stay loadable by name. It changes no other key, leaves a skill you set to another value alone, and writes nothing if the file is not valid JSON. The change takes effect in a new session. It covers project skills only. **Reminder:** at every session start, while some project skill still sends its full description (no override for it in that file), the router says so with a toast and a notice in the conversation, naming `/jev-skills hide all`; it writes nothing itself. Turn it off with `skill_trim_hint`.
+**`/jev-skills`** cuts a project's skills down to their names in the listing Claude Code sends Claude (the descriptions are most of its tokens): `hide all` (or names) sets `skillOverrides` to `name-only` for them in the project's `.claude/settings.local.json` (the folder the session started in; the file is yours, usually kept out of Git), `show` takes back only what it set. Jev still ranks them by their full SKILL.md description, read from the files; Claude sees a name until Jev picks one, and then the name and description of that one in the hint. The skills stay loadable by name, and Claude Code loads the full text when Claude asks for it. It changes no other key, leaves a skill you set to another value alone, and writes nothing if the file is not valid JSON. The change takes effect in a new session. It covers project skills only. **Reminder:** at every session start, while some project skill still sends its full description (no override for it in that file), the router says so with a toast and a notice in the conversation, naming `/jev-skills hide all`; it writes nothing itself. Turn it off with `skill_trim_hint`.
 
 **Asking Jev during the work.** The plugin ships the skill `jev-router:ask-jev` and the `decide` tool. The skill tells Claude it **may** hand a narrow decision within its own authority to Jev (a Choice, a yes/no probability or a Score), including whether a step belongs to the task the user asked for. It is a suggestion: no tool is required before another and no call is refused. The skill costs one short entry in Claude's skill listing; Jev does not index it.
 
@@ -50,7 +47,7 @@ This is because Claude Code's design leaves no way around it, not a choice of th
 
 - No setting empties the listing: Claude Code states that it always carries every skill's name, and its budget settings only cut descriptions.
 - The settings that hide a skill from Claude (`disable-model-invocation`, `skillOverrides` set to `off` or `user-invocable-only`) also stop Claude loading it, which would defeat Jev picking a skill for Claude to use.
-- A mod hook could rewrite or drop the listing (`prompt.attachment` with `{ text: null }`), but the hook was never called for it, in the VS Code extension or in a headless `claude -p` run: the log recorded no attachment of any kind, while the listing still reached Claude. `claude plugin validate` says why: where an organization manages Claude Code, the `prompt.*` events pass over the plugins a person installs. The router logs each prompt section, context block and the Skill tool's description (type and size only) and none of them held the skill names, so it no longer tries to drop the listing.
+- A mod hook could rewrite or drop the listing (`prompt.attachment` with `{ text: null }`), but the hook was never called for it, in the VS Code extension or in a headless `claude -p` run: the log recorded no attachment of any kind, while the listing still reached Claude. `claude plugin validate` says why: where an organization manages Claude Code, the `prompt.*` events pass over the plugins a person installs. So the router neither tries to drop the listing nor registers any `prompt.*` hook; what it adds goes beside the user's message (`prompt.submit`), which does run.
 - A mod cannot change Claude Code's settings for you, and the router does not write them behind your back: `/jev-skills` writes only when you run it.
 
 For these skills Jev's pick is added beside the listing, not instead of it, and Claude can still load any of them by name.
@@ -244,9 +241,8 @@ The settings page holds the settings people change:
 | Tool selection threshold (`tool_threshold`) | 0.5 |
 | Tool save threshold (`tool_save_threshold`) | 0.5 |
 | Automatic decisions (`decision_routing`) | on |
-| Load mode | hint |
 | Gate threshold | 0.5 |
-| Fits threshold | 0.3 |
+| Fits threshold | 0.5 |
 | Model routing | dry-run |
 | Fallback model | session |
 | Feasibility threshold | 0.6 |

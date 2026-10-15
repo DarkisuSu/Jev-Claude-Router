@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
-import { DECISION_TOOL, DECISION_INSTRUCTIONS, evaluateDecision, prepareDecision } from './decisions'
+import { DECISION_TOOL, evaluateDecision, prepareDecision } from './decisions'
 import { FAKE_KEY, logLines, memoryStore, world } from './testkit'
 
 // Arbitrary task vocabulary: the feature has no predefined action categories.
@@ -18,7 +18,6 @@ const answer = () => ({ model: 'jev-test', answers: {
   intact: { type: 'noul', noul: 0.9 },
   readiness: { type: 'score', score: 1.1, probabilities: { '0': 0, '1': 0.9, '2': 0.1 }, confidence: 0.8 },
 } })
-const promptArgs = (tools: string[]) => ({ model: 'claude-sonnet-4-6', promptModel: 'claude-sonnet-4-6', tools, surfaces: [], outputStyle: null, traits: [] })
 // A tool's result reaches the engine as text: it must be a string, and parse back into the decision.
 const parsed = (call: { result?: unknown }) => {
   expect(typeof call.result).toBe('string')
@@ -96,20 +95,15 @@ describe('generic typed decisions', () => {
 })
 
 describe('decision plugin integration', () => {
-  test('registers an upfront tool and appends the policy only when that tool is offered', { options: { typesafe_api_key: FAKE_KEY } }, async ($, on) => {
+  test('registers an upfront tool', { options: { typesafe_api_key: FAKE_KEY } }, async ($, on) => {
     mock.clock(on); memoryStore(on)
     world(on, () => ({ status: 200, body: answer() }))
     let tool: any
     on('tool.register', ($, e) => { tool = e; return { value: { tool: DECISION_TOOL } } as never })
     on('session.start', ($, e) => ({ cwd: e.cwd }))
-    on('prompt.compose', () => ({ sections: [{ id: 'existing', text: 'Keep this', scope: 'session' }] }))
     await $.session.start({ cwd: 'C:/fakeproject' } as never)
     expect(tool.name).toBe('decide')
     expect(tool.isDeferred).toBe(false)
-    const composed = await $.prompt.compose(promptArgs([DECISION_TOOL]))
-    expect(composed.sections.map(s => s.id)).toEqual(['existing', 'jev-router:decisions'])
-    expect(composed.sections[1]?.text).toBe(DECISION_INSTRUCTIONS)
-    expect((await $.prompt.compose(promptArgs([]))).sections.map(s => s.id)).toEqual(['existing'])
   })
   test('a tool call sends evidence and returns a decision even with model and skill routing off', { options: { typesafe_api_key: FAKE_KEY, model_routing: 'off', skill_routing: false, write_log: true } }, async ($, on) => {
     mock.clock(on); memoryStore(on)
@@ -129,11 +123,9 @@ describe('decision plugin integration', () => {
     expect(w.fetches.length).toBe(1)
   })
   for (const options of [{ decision_routing: false, typesafe_api_key: FAKE_KEY }, { enabled: false, typesafe_api_key: FAKE_KEY }, {}]) {
-    test(`disabled or no key: no request and no system policy (${JSON.stringify(options)})`, { options }, async ($, on) => {
+    test(`disabled or no key: no request (${JSON.stringify(options)})`, { options }, async ($, on) => {
       mock.clock(on); memoryStore(on)
       const w = world(on, () => ({ status: 200, body: answer() }))
-      on('prompt.compose', () => ({ sections: [] }))
-      expect((await $.prompt.compose(promptArgs([DECISION_TOOL]))).sections.length).toBe(0)
       const result = await $.tool.call({ tool: DECISION_TOOL, ...input() } as never)
       expect(parsed(result).status).toBe('unavailable')
       expect(w.fetches.length).toBe(0)

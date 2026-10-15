@@ -37,17 +37,11 @@ export const MAX_PATH = 400
 export const SAVE_DESCRIPTION =
   'Save a reusable tool (script or command file) you wrote while working, so a similar task later can start from it instead of rewriting it. Save only work that is likely to repeat, with a durable absolute path (not a temporary folder) and a description of the kind of task it solves. Never save credentials or one-off scripts. This registers a pointer; it does not copy or run the file.'
 
-export const SAVE_INSTRUCTIONS = [
-  'When a `<tool_relevance>` hint names a saved tool, read the file and use it if it fits; do not rewrite work a saved tool already does.',
-  'When you notice repeated work, or that you wrote a script a similar task will want again, save it with mcp__jev-router__save_tool: a durable absolute path (never a temporary folder), a one-line description of the kind of task it solves, and how to run it. Use scope project for work tied to this project, global for work useful anywhere. Do not save one-off scripts, scripts holding credentials or personal data, or what a saved tool already covers; saving the same name again updates it.',
-  'A saved tool is a pointer: Jev suggests it, you decide whether to run it, and normal permission checks still apply. If saving is declined or fails, continue the task; do not retry the same save.',
-].join('\n')
-
 const descriptionSchema = (max: number) => ({ type: 'string', minLength: 1, maxLength: max })
 export const SAVE_SCHEMA = {
   type: 'object',
   properties: {
-    name: { type: 'string', pattern: NAME.source, description: 'Short identifier for the tool (letters, digits, - and _; not "none"). Saving an existing name updates it.' },
+    name: { type: 'string', pattern: NAME.source, description: 'Short identifier for the tool (letters, digits, - and _). Saving an existing name updates it.' },
     description: { ...descriptionSchema(MAX_DESCRIPTION), description: 'The kind of task it solves, so a later request can be matched to it.' },
     usage: { ...descriptionSchema(MAX_USAGE), description: 'How to run it, e.g. "python tools/convert.py <input> <output>".' },
     path: { ...descriptionSchema(MAX_PATH), description: 'Absolute path of the file; it must exist and last (not a temporary folder).' },

@@ -10,7 +10,7 @@ const rounds = (w: World) => logLines(w).filter(r => r.type === 'round')
 const isWide = (q: Record<string, unknown>) => 'catalog_has_match' in q
 
 describe('skill router', () => {
-  test('match: a skill whose fits clears the 0.3 default rides beside the prompt as a hint', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
+  test('match: a skill whose fits clears the 0.5 default rides beside the prompt as a hint', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
     mock.clock(on)
     const w = world(on, q => (isWide(q) ? { status: 200, body: rankWide(0.9, 'speckit-specify') } : { status: 200, body: rerank(q, { 'speckit-specify': 0.85 }) }))
 
@@ -20,7 +20,9 @@ describe('skill router', () => {
     expect(w.fetches[0]?.url).toBe('https://api.typesafe.ai/v1/systemone')
     expect(w.fetches[0]?.auth).toBe(`Bearer ${FAKE_KEY}`)
     expect(w.seen?.text).toBe(PROMPT)
-    expect(w.seen?.context?.join('\n')).toContain('`speckit-specify` appears relevant')
+    const hint = w.seen?.context?.join('\n') ?? ''
+    expect(hint).toContain('- speckit-specify: ')
+    expect(hint).toContain('the result of that screening, not the full list')
 
     const [round] = rounds(w)
     expect(round?.outcome).toBe('selected')
@@ -46,7 +48,9 @@ describe('skill router', () => {
     await $.prompt.submit({ text: PROMPT, asUser: true })
 
     expect(rounds(w)[0]?.selected.map((x: any) => x.name)).toEqual(['speckit-plan', 'speckit-specify'])
-    expect(w.seen?.context?.join('\n')).toContain('`speckit-plan`, `speckit-specify`')
+    const hint = w.seen?.context?.join('\n') ?? ''
+    expect(hint.indexOf('- speckit-plan: ')).toBeGreaterThan(-1)
+    expect(hint.indexOf('- speckit-specify: ')).toBeGreaterThan(hint.indexOf('- speckit-plan: '))
   })
 
   test('the fits threshold comes from settings', { options: { typesafe_api_key: FAKE_KEY, write_log: true, fits_threshold: 0.85 } }, async ($, on) => {
@@ -124,7 +128,7 @@ describe('skill router', () => {
     await $.prompt.submit({ text: PROMPT, asUser: true })
 
     expect(w.fetches.length).toBe(2)
-    expect(w.seen?.context?.join('\n')).toContain('`speckit-specify`')
+    expect(w.seen?.context?.join('\n')).toContain('- speckit-specify: ')
     expect(w.written.size).toBe(0)
   })
 
@@ -184,6 +188,21 @@ describe('route', () => {
     expect(neither).toMatchObject({ outcome: 'no-match', reason: 'gate', gate: { score: 0.2 } })
     expect((await run(0.9, 0.1)).result.outcome).toBe('selected')
     expect((await run(0.1, 0.9)).result.outcome).toBe('selected')
+  })
+
+  test('Jev reads a skill by name and full description, never by its SKILL.md body', async () => {
+    const withBody = [{ name: 'speckit-plan', description: 'short', descriptionFull: 'The full description of planning.', body: 'SECRET BODY OF THE SKILL' }]
+    const bodies: string[] = []
+    const send = async (body: string) => {
+      bodies.push(body)
+      const q = JSON.parse(body).questions
+      return { status: 200, text: JSON.stringify('fits::speckit-plan' in q ? { model: 'j', answers: { 'fits::speckit-plan': { type: 'noul', noul: 0.9 }, which: { type: 'choice', choice: 'speckit-plan', probabilities: { 'speckit-plan': 1 }, confidence: 1 } } } : rankWide(0.9, 'speckit-plan', {}, q)) }
+    }
+    await route(PROMPT, withBody, cfg, send, now)
+    const rerankQuestions = JSON.parse(bodies[1] ?? '{}').questions
+    expect(rerankQuestions.which.criteria['speckit-plan']).toBe('The full description of planning.')
+    expect(rerankQuestions['fits::speckit-plan'].instructions).toContain('The full description of planning.')
+    expect(bodies.join('\n')).not.toContain('SECRET BODY')
   })
 
   test('model questions ride request 1 even with an empty skill index', async () => {

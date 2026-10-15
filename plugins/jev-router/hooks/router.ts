@@ -2,7 +2,6 @@
 
 import {
   DEFAULT_EFFORT_LEVELS,
-  EXCERPT_CHARS,
   GATE_QUESTIONS,
   MAX_CHOICE_OPTIONS,
   RANK_WIDE_INSTRUCTIONS,
@@ -23,9 +22,8 @@ export type Skill = {
   name: string
   // One-line index description, already cut to size.
   description: string
-  // The full description and the start of SKILL.md, when the file was found.
+  // The full description, when the file was found.
   descriptionFull?: string
-  body?: string
 }
 
 export type RouteConfig = {
@@ -135,10 +133,9 @@ export const rankWideBody = (request: string, skills: readonly Skill[], config: 
   return { state: state(request, config.recentContext, config.routingContext, lists), model: config.model, questions }
 }
 
-const rerankText = (skill: Skill) => {
-  const full = skill.descriptionFull ?? skill.description
-  return skill.body ? `${full} — ${skill.body.slice(0, EXCERPT_CHARS)}` : full
-}
+// What Jev reads about a skill: its name and full description, nothing of the
+// SKILL.md body. The description is what says when the skill applies.
+const rerankText = (skill: Skill) => skill.descriptionFull ?? skill.description
 
 export const rerankBody = (request: string, shortlist: readonly Skill[], model: string, recent = '') => {
   const criteria: Record<string, string> = {}
@@ -258,7 +255,7 @@ export const route = async (
       return { outcome: 'no-match', selected: [], gate, shortlist, reason: 'gate', calls, ...models }
     }
 
-    // Request 2: reread the shortlist with each skill's own text.
+    // Request 2: reread the shortlist with each skill's full description.
     const byName = new Map(skills.map(s => [s.name, s]))
     const candidates = shortlist.map(s => byName.get(s.name)).filter((s): s is Skill => s !== undefined)
     if (candidates.length === 0) {

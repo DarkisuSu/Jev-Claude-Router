@@ -29,7 +29,7 @@ export const MODEL_ROW = {
 const row = (field: string, value: unknown, kind: string) => ({ key: `jev-router@inline.${field}`, label: field, kind, value, provider: { kind: 'plugin' }, isLocked: false })
 export const PLUGIN_ROWS = [
   row('model_threshold', 0.9, 'number'),
-  row('fits_threshold', 0.3, 'number'),
+  row('fits_threshold', 0.5, 'number'),
   row('skill_routing', true, 'boolean'),
   row('fallback_model', 'opus', 'choice'),
   row('typesafe_api_key', 'secret-not-listed', 'text'),
@@ -40,7 +40,7 @@ const MANIFEST = JSON.stringify({
   userConfig: {
     typesafe_api_key: { type: 'string' },
     model_threshold: { type: 'number', default: 0.5 },
-    fits_threshold: { type: 'number', default: 0.3 },
+    fits_threshold: { type: 'number', default: 0.5 },
     skill_routing: { type: 'boolean', default: true },
     fallback_model: { type: 'string', default: 'session' },
     reset_to_defaults: { type: 'boolean', default: false },

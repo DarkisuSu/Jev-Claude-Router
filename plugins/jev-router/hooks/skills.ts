@@ -4,15 +4,13 @@
 import { INDEX_DESCRIPTION_CHARS } from './questions'
 import type { Skill } from './router'
 
-export const BODY_CHARS = 20000
-
-export type Found = { name?: string; description?: string; body: string; path: string }
+export type Found = { name?: string; description?: string; path: string }
 
 export type Command = { name: string; description: string; source: string }
 
 export type SkillIndex = {
   skills: Skill[]
-  // SKILL.md path per skill name, for inject mode and /jev-index.
+  // SKILL.md path per skill name, for /jev-index.
   paths: Record<string, string>
   builtAt: number
   sources: { commands: number; files: number; dropped: number }
@@ -25,9 +23,9 @@ export const parent = (p: string) => {
   return i > 0 ? p.slice(0, i) : undefined
 }
 
-export const parseSkillMd = (text: string): { name?: string; description?: string; body: string } => {
+export const parseSkillMd = (text: string): { name?: string; description?: string } => {
   const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text)
-  if (!m) return { body: text }
+  if (!m) return {}
   const front = m[1] ?? ''
   const field = (key: string) => {
     const line = new RegExp(`^${key}:[ \\t]*(.*)$`, 'm').exec(front)
@@ -45,7 +43,7 @@ export const parseSkillMd = (text: string): { name?: string; description?: strin
     }
     return value.replace(/^["']|["']$/g, '') || undefined
   }
-  return { name: field('name'), description: field('description'), body: (m[2] ?? '').trim() }
+  return { name: field('name'), description: field('description') }
 }
 
 const cut = (text: string, n: number) => (text.length > n ? `${text.slice(0, n - 1)}…` : text)
@@ -67,7 +65,6 @@ export const assembleIndex = (
       name,
       description: cut(descriptionFull, INDEX_DESCRIPTION_CHARS),
       descriptionFull,
-      body: found?.body,
     })
     if (found) paths[name] = found.path
   }

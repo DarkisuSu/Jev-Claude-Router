@@ -32,7 +32,6 @@ const beneath = (on: Parameters<typeof memoryStore>[0]) => {
   const registered: string[] = []
   on('tool.register', (_, e) => { registered.push(e.name); return { value: { tool: e.name } } as never })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('prompt.compose', () => ({ sections: [] }))
   return registered
 }
 const start = ($: Engine) => $.session.start({ cwd: 'C:/fakeproject' } as never)

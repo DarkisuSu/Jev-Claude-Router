@@ -23,7 +23,6 @@ import { horizonFor, learnOutput, median, normalizeStats, outputSummary, pairCos
 import { ENDPOINT, saveQuestion } from './questions'
 import {
   SAVE_DESCRIPTION,
-  SAVE_INSTRUCTIONS,
   SAVE_SCHEMA,
   SAVE_TOOL,
   mergeTools,
@@ -46,9 +45,8 @@ import { SHARED, parseSetting, settingValue, sharedConfig } from './settings'
 import { JevError, route, type RouteResult, type Send } from './router'
 import { EMPTY_ATTEMPT, STATE_CHAR_BUDGET, STATE_RESERVE, recentContext, routingFacts, scrubText, type AttemptFacts } from './awareness'
 import { applyHide, hiddenNames, overridesOf } from './hide'
-import { DECISION_TOOL, DECISION_DESCRIPTION, DECISION_INSTRUCTIONS, DECISION_SCHEMA, decisionText, prepareDecision, evaluateDecision } from './decisions'
+import { DECISION_TOOL, DECISION_DESCRIPTION, DECISION_SCHEMA, decisionText, prepareDecision, evaluateDecision } from './decisions'
 import {
-  BODY_CHARS,
   assembleIndex,
   norm,
   parent,
@@ -60,7 +58,6 @@ import {
 
 const INDEX_TTL_MS = 5 * 60 * 1000
 const PROJECT_DEPTH = 8
-const INJECT_CHARS = 20000
 const LOG_DIR_NAME = 'jev-router-jev-local'
 const KEPT_TURNS = 20
 const CAPS_KEY = 'caps'
@@ -92,7 +89,6 @@ type Config = {
   probeWaitMs: number
   tools: ReturnType<typeof sharedConfig>['tools']
   decisionConfidence: number
-  mode: 'hint' | 'inject'
   shortlist: number
   gateThreshold: number
   fitsThreshold: number
@@ -120,10 +116,9 @@ export const readConfig = (o: PluginOptions): Config => ({
   key: typeof o.typesafe_api_key === 'string' ? o.typesafe_api_key.trim() : '',
   enabled: o.enabled !== false,
   skillRouting: o.skill_routing !== false,
-  mode: o.mode === 'inject' ? 'inject' : 'hint',
   shortlist: 3,
   gateThreshold: num(o.gate_threshold, 0.5, 0, 1),
-  fitsThreshold: num(o.fits_threshold, 0.3, 0, 1),
+  fitsThreshold: num(o.fits_threshold, 0.5, 0, 1),
   resetRequested: o.reset_to_defaults === true,
   writeLog: o.write_log === true,
   ...sharedConfig(o),
@@ -189,22 +184,19 @@ const sha256Prefix = async (text: string) => {
   }
 }
 
-export const hintBlock = (names: readonly string[]) =>
+// How much of a skill's description the hint shows: Claude Code's own listing
+// also shows the description, so Claude can choose as it would from that listing.
+const HINT_DESCRIPTION_CHARS = 1024
+const hintLine = (text: string, max: number) => text.replace(/[<>`]/g, "'").replace(/\s+/g, ' ').trim().slice(0, max)
+
+// The skills Jev kept for this request, with their descriptions: the result of
+// the screening, not the whole list. Claude still chooses among them.
+export const hintBlock = (skills: readonly { name: string; description: string }[]) =>
   [
     '<skill_relevance source="jev-router (TypeSafe Jev)">',
-    names.length === 1
-      ? `The skill \`${names[0]}\` appears relevant to this request. If it fits, load it with the Skill tool before acting; if it does not fit, ignore this hint.`
-      : `These skills appear relevant to this request, most relevant first: ${names.map(n => `\`${n}\``).join(', ')}. Load the ones that fit with the Skill tool before acting; ignore any that do not fit.`,
+    `Jev screened the installed skills against this request and kept ${skills.length === 1 ? 'the skill' : 'the skills'} below${skills.length === 1 ? '' : ', most relevant first'}. The names and descriptions here are the result of that screening, not the full list. Choose among them: load the one that fits with the Skill tool before acting, or ignore them if none fits.`,
+    ...skills.map(s => `- ${s.name}: ${hintLine(s.description, HINT_DESCRIPTION_CHARS)}`),
     '</skill_relevance>',
-  ].join('\n')
-
-export const injectBlock = (name: string, body: string) =>
-  [
-    `<skill_instructions name="${name}" source="jev-router (TypeSafe Jev)" activation="injected-not-native">`,
-    `jev-router judged the skill \`${name}\` relevant and injected its SKILL.md text below. This is not a native skill activation. Follow it only if it fits the request.`,
-    '',
-    body.slice(0, INJECT_CHARS),
-    '</skill_instructions>',
   ].join('\n')
 
 // A skill is named `plugin:skill` in the index and may be invoked bare.
@@ -213,7 +205,7 @@ const sameSkill = (a: string, b: string) => a === b || a.endsWith(`:${b}`) || b.
 type Round = {
   id: string
   selected: string[]
-  delivery: Record<string, 'hint' | 'inject'>
+  delivery: Record<string, 'hint'>
   loaded: Set<string>
 }
 
@@ -462,7 +454,7 @@ function log($: EngineInterface, entry: Record<string, unknown>) {
 async function readSkill($: EngineInterface, path: string): Promise<Found | undefined> {
   try {
     const parsed = parseSkillMd(await $.fs.read(path))
-    return { ...parsed, body: parsed.body.slice(0, BODY_CHARS), path }
+    return { ...parsed, path }
   } catch {
     return undefined
   }
@@ -1321,9 +1313,6 @@ async function dataCommand($: EngineInterface, raw: string): Promise<string> {
   return 'jev-router: /jev-data [status | clear logs [today|all] | clear learned | clear tools [project|global|all] [--keep-files] | clear all [--keep-files]]'
 }
 
-// Whether a text lists skills (a name every skill list here has): diagnostic only.
-const mentionsSkills = (text: unknown) => typeof text === 'string' && /speckit-|anthropic-skills:|typesafe:typesafe-ai/.test(text)
-
 // The status line, with the skill-trim reminder after it while one is due.
 function setStatus($: EngineInterface, line: string) {
   try {
@@ -1394,11 +1383,7 @@ async function finishRound($: EngineInterface, why: string) {
   const status = round.selected.map(name => ({
     skill: name,
     delivery: round.delivery[name],
-    status: [...round.loaded].some(n => sameSkill(n, name))
-      ? 'native-loaded'
-      : round.delivery[name] === 'inject'
-        ? 'injected'
-        : 'not-loaded',
+    status: [...round.loaded].some(n => sameSkill(n, name)) ? 'native-loaded' : 'not-loaded',
   }))
   const others = [...round.loaded].filter(n => !round.selected.some(s => sameSkill(s, n)))
   await log($, { type: 'turn', round: round.id, why, skills: status, other_native_loads: others })
@@ -1467,7 +1452,7 @@ function statusText() {
     : 'no routed step yet'
   return [
     `jev-router model routing: ${c.routing} (the cheapest tier/effort Jev judges ≥ ${c.feasibleThreshold} feasible, the likeliest among those within ${Math.round(c.cost.tolerance * 100)}% of its cost; costed over ${horizonNow().horizon} requests (${horizonNow().source}); fallback ${c.fallback} when Jev gives no answer)`,
-    `skill selection: ${c.skillRouting ? 'on' : 'off'} (gate ≥ ${c.gateThreshold}, fits ≥ ${c.fitsThreshold}, shortlist ${c.shortlist}, load mode ${c.mode})`,
+    `skill selection: ${c.skillRouting ? 'on' : 'off'} (gate ≥ ${c.gateThreshold}, fits ≥ ${c.fitsThreshold}, shortlist ${c.shortlist})`,
     `saved tools: selection ${c.tools.routing ? 'on' : 'off'}, saving ${c.tools.save ? 'on' : 'off'} (see /jev-tool)`,
     `decision routing: ${c.decisionRouting ? 'on' : 'off'} (assistant-owned judgments only; confidence threshold ${c.decisionConfidence})`,
     `models from this Claude Code (${S.available.source}): ${fams}`,
@@ -1549,7 +1534,6 @@ export const register: Register = (on, options) => {
       type: 'session',
       enabled: config.enabled,
       has_key: config.key.length > 0,
-      mode: config.mode,
       skill_routing: config.skillRouting,
       routing: config.routing,
       gate_threshold: config.gateThreshold,
@@ -1563,40 +1547,6 @@ export const register: Register = (on, options) => {
     })
     return next(e)
   })
-
-  // A stable system section keeps the policy available during tool loops and
-  // after compaction. Only add it to prompts actually offering the tool.
-  on('prompt.compose', async ($, e, next) => {
-    const result = await next(e)
-    await log($, { type: 'attachment', kind: 'compose', sections: result.sections.map(x => ({ id: x.id, chars: x.text.length, has_skill_names: mentionsSkills(x.text) })) })
-    if (!config.enabled || !config.key) return result
-    let sections = result.sections
-    const add = (id: string, text: string) => {
-      sections = [...sections.filter(s => s.id !== id), { id, text, scope: 'session' as const }]
-    }
-    if (config.decisionRouting && e.tools.includes(DECISION_TOOL)) add('jev-router:decisions', DECISION_INSTRUCTIONS)
-    if (config.tools.save && e.tools.includes(SAVE_TOOL)) add('jev-router:tools', SAVE_INSTRUCTIONS)
-    return sections === result.sections ? result : { ...result, sections }
-  }).catch(($, e, next) => next(e))
-
-  // Which attachments the engine raises, by type and size alone: shows whether
-  // the skill list comes through here. Written only when logging is on.
-  on('prompt.attachment', async ($, e, next) => {
-    await log($, { type: 'attachment', kind: String((e as { type?: unknown }).type), chars: typeof e.text === 'string' ? e.text.length : 0, has_skill_names: mentionsSkills(e.text) })
-    return next(e)
-  }).catch(($, e, next) => next(e))
-  on('prompt.section', async ($, e, next) => {
-    await log($, { type: 'attachment', kind: `section:${e.name}`, chars: typeof e.text === 'string' ? e.text.length : 0, has_skill_names: mentionsSkills(e.text) })
-    return next(e)
-  }).catch(($, e, next) => next(e))
-  on('prompt.context', async ($, e, next) => {
-    await log($, { type: 'attachment', kind: 'context', blocks: e.blocks.map(b => ({ name: b.name, chars: b.text.length, has_skill_names: mentionsSkills(b.text) })) })
-    return next(e)
-  }).catch(($, e, next) => next(e))
-  on('tool.describe', { tool: 'Skill' }, async ($, e, next) => {
-    await log($, { type: 'attachment', kind: 'tool.describe:Skill', chars: e.description.length, has_skill_names: mentionsSkills(e.description) })
-    return next(e)
-  }).catch(($, e, next) => next(e))
 
   on('tool.call', { tool: 'mcp__jev-router__save_tool' }, async ($, e) => {
     const result = await saveToolCall($, { name: e.name, description: e.description, usage: e.usage, path: e.path, scope: e.scope })
@@ -1762,19 +1712,14 @@ export const register: Register = (on, options) => {
       setStatus($, `model ${chosen}`)
     }
 
-    const delivery: Record<string, 'hint' | 'inject'> = {}
+    const delivery: Record<string, 'hint'> = {}
     const context: string[] = []
     if (result.outcome === 'selected') {
-      const hinted: string[] = []
+      const hinted: { name: string; description: string }[] = []
       for (const s of result.selected) {
-        const body = config.mode === 'inject' ? skills.find(k => k.name === s.name)?.body : undefined
-        if (body) {
-          context.push(injectBlock(s.name, body))
-          delivery[s.name] = 'inject'
-        } else {
-          hinted.push(s.name)
-          delivery[s.name] = 'hint'
-        }
+        const skill = skills.find(k => k.name === s.name)
+        hinted.push({ name: s.name, description: skill?.descriptionFull ?? skill?.description ?? '' })
+        delivery[s.name] = 'hint'
       }
       if (hinted.length > 0) context.unshift(hintBlock(hinted))
       if (!midTurn) S.pending = { id, selected: result.selected.map(s => s.name), delivery, loaded: new Set() }
@@ -1810,7 +1755,6 @@ export const register: Register = (on, options) => {
       index_size: skills.length,
       skill_routing: config.skillRouting,
       tools: toolOptions.length > 0 ? { options: toolOptions.length, match: result.toolMatch ?? null, picked: pickedTools.map(p => ({ name: p.tool.name, scope: p.tool.scope, probability: p.probability })), stale: staleTools } : undefined,
-      mode: config.mode,
       outcome: result.outcome,
       reason: result.reason,
       gate: result.gate,
