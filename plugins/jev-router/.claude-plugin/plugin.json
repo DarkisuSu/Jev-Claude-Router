@@ -1,7 +1,7 @@
 {
   "name": "jev-router",
   "displayName": "Jev Router",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Routes skills and models with TypeSafe Jev and supplies automatic assistant-owned typed decisions throughout a task",
   "author": {
     "name": "Darkisu.Su"
