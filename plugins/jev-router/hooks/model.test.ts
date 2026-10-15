@@ -69,7 +69,7 @@ const turn = async ($: Engine, w: World, text = PROMPT) => {
   return w
 }
 
-const ON = { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true, model_routing: 'on' }
+const ON = { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' }
 
 const steps = (w: World) => logLines(w).filter(l => l.type === 'step')
 
@@ -77,7 +77,7 @@ const steps = (w: World) => logLines(w).filter(l => l.type === 'step')
 // and haiku are learned. No context is known here, so pairs are ordered by
 // list price, then tier, then effort (unknown test ids: tier, then effort).
 describe('model routing', () => {
-  test('dry-run: logs what Jev would send and sends the session model unchanged', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true } }, async ($, on) => {
+  test('dry-run: logs what Jev would send and sends the session model unchanged', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
     const w = world(on, answers({ 'opus::high': 0.9 }))
@@ -95,7 +95,7 @@ describe('model routing', () => {
     expect(logLines(w).find(l => l.type === 'round')?.decision).toEqual({ family: 'opus', effort: 'high', how: 'cheapest-feasible', threshold: 0.6 })
   })
 
-  test('Jev is asked every routable tier at every effort, apart from cost', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true, model_routing: 'on' } }, async ($, on) => {
+  test('Jev is asked every routable tier at every effort, apart from cost', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
     const w = world(on, answers())
@@ -109,7 +109,7 @@ describe('model routing', () => {
     expect(questions.effort_level).toBeUndefined()
   })
 
-  test('on: every main step of the turn is sent with the learned full id and effort', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true, model_routing: 'on' } }, async ($, on) => {
+  test('on: every main step of the turn is sent with the learned full id and effort', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
     const w = world(on, answers({ 'opus::high': 0.9 }))
@@ -125,7 +125,7 @@ describe('model routing', () => {
     expect(w.fetches.length).toBe(2)
   })
 
-  test('on: the cheapest pair Jev judges feasible runs: a lower tier and a lower effort first', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true, model_routing: 'on' } }, async ($, on) => {
+  test('on: the cheapest pair Jev judges feasible runs: a lower tier and a lower effort first', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
     const w = world(on, answers({ 'haiku::medium': 0.9, 'haiku::high': 0.95, 'opus::low': 0.99 }))
@@ -167,7 +167,7 @@ describe('model routing', () => {
     expect(seen[0]).toEqual({ model: OPUS, effort: 'max', agentId: undefined })
   })
 
-  test('on: a cheaper pair below the feasibility threshold gives way to a dearer feasible one', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true, model_routing: 'on' } }, async ($, on) => {
+  test('on: a cheaper pair below the feasibility threshold gives way to a dearer feasible one', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
     const w = world(on, answers({ 'haiku::low': 0.59, 'opus::medium': 0.8 }))
@@ -205,7 +205,7 @@ describe('model routing', () => {
     expect(steps(w)[0]?.reasons).toContain('model:fallback-haiku (no-jev-answer)')
   })
 
-  test('the effort descriptions Jev sees come from settings', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true, model_routing: 'on' } }, async ($, on) => {
+  test('the effort descriptions Jev sees come from settings', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, { ...LEARNED, advanced: { effort_low: 'my low', effort_high: 'my high' } })
     const w = world(on, answers())
@@ -220,7 +220,7 @@ describe('model routing', () => {
     expect(questions['feasible::opus::medium'].instructions).toContain('Moderate reasoning')
   })
 
-  test('on: a tier whose full id has not been learned is neither asked nor sent', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true, model_routing: 'on' } }, async ($, on) => {
+  test('on: a tier whose full id has not been learned is neither asked nor sent', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, {})
     const w = world(on, answers({ 'opus::high': 0.9 }))
@@ -234,7 +234,7 @@ describe('model routing', () => {
     expect(steps(w)[0]?.reasons).toContain('model:none-routable')
   })
 
-  test('on: a tier whose effort support is unknown is not asked about', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true, model_routing: 'on' } }, async ($, on) => {
+  test('on: a tier whose effort support is unknown is not asked about', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, { caps: { ...CAPS, families: { haiku: { id: HAIKU, ok: true, at: '' } } } })
     const w = world(on, answers({ 'haiku::low': 0.9 }))
@@ -247,7 +247,7 @@ describe('model routing', () => {
     expect(seen[0]?.model).toBe(SONNET)
   })
 
-  test('on: a target known to take no effort is sent without one', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true, model_routing: 'on' } }, async ($, on) => {
+  test('on: a target known to take no effort is sent without one', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, { caps: { ...CAPS, families: { haiku: { id: HAIKU, ok: true, effort: false, at: '' } } } })
     const w = world(on, answers({ 'haiku::low': 0.9 }))
@@ -260,7 +260,7 @@ describe('model routing', () => {
     expect(steps(w)[0]?.reasons).toContain('effort:target-has-none')
   })
 
-  test('on: a Jev error keeps the session model', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true, model_routing: 'on' } }, async ($, on) => {
+  test('on: a Jev error keeps the session model', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
     const w = world(on, () => ({ status: 529, body: {} }))
@@ -273,7 +273,7 @@ describe('model routing', () => {
     expect(steps(w)[0]?.reasons).toContain('model:no-jev-answer')
   })
 
-  test('on: subagent steps keep their own model', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true, model_routing: 'on' } }, async ($, on) => {
+  test('on: subagent steps keep their own model', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
     const w = world(on, answers({ 'opus::high': 0.9 }))
@@ -285,7 +285,7 @@ describe('model routing', () => {
     expect(seen[0]).toEqual({ model: HAIKU, effort: 'medium', agentId: 'a1' })
   })
 
-  test('on: a failed routed request is resent on the session model and the model is not tried again', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true, model_routing: 'on' } }, async ($, on) => {
+  test('on: a failed routed request is resent on the session model and the model is not tried again', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
     const w = world(on, answers({ 'opus::high': 0.9 }))
@@ -319,7 +319,7 @@ describe('model routing', () => {
 })
 
 describe('learning and probe', () => {
-  test('a main step teaches the current family without any probe', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true } }, async ($, on) => {
+  test('a main step teaches the current family without any probe', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, {})
     const w = world(on, answers({ 'opus::high': 0.9 }))
@@ -332,7 +332,7 @@ describe('learning and probe', () => {
     expect(status.text).toContain(`sonnet: ${SONNET}, seen answering, takes effort (from main-step)`)
   })
 
-  test('probe resolves each alias through a subagent, learns from its step, and arms the resend check', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true } }, async ($, on) => {
+  test('probe resolves each alias through a subagent, learns from its step, and arms the resend check', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
     const clock = mock.clock(on)
     mock.store(on, {})
     const w = world(on, answers({ 'opus::high': 0.9 }))
@@ -385,7 +385,7 @@ describe('automatic probe', () => {
     return aliases
   }
 
-  test('first use: the message waits for the probe, then Jev chooses the model; once per load', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true } }, async ($, on) => {
+  test('first use: the message waits for the probe, then Jev chooses the model; once per load', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
     const clock = mock.clock(on)
     mock.store(on, LEARNED)
     const w = world(on, answers())
@@ -414,7 +414,7 @@ describe('automatic probe', () => {
     expect(aliases).toEqual(['sonnet'])
   })
 
-  test('a probe that never answers holds the message only for the wait, then it goes on', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true } }, async ($, on) => {
+  test('a probe that never answers holds the message only for the wait, then it goes on', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
     const clock = mock.clock(on)
     mock.store(on, LEARNED)
     const w = world(on, answers())
@@ -430,7 +430,7 @@ describe('automatic probe', () => {
     expect(logLines(w).find(l => l.type === 'probe' && l.kind === 'wait')).toMatchObject({ families: ['sonnet'], done: false })
   })
 
-  test('probe_wait_ms 0 does not hold the message', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true } }, async ($, on) => {
+  test('probe_wait_ms 0 does not hold the message', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, { ...LEARNED, advanced: { probe_wait_ms: 0 } })
     const w = world(on, answers())
@@ -442,7 +442,7 @@ describe('automatic probe', () => {
     expect(aliases).toEqual(['sonnet'])
   })
 
-  test('no automatic probe with model routing off', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', model_routing: 'off' } }, async ($, on) => {
+  test('no automatic probe with model routing off', { options: { typesafe_api_key: FAKE_KEY, model_routing: 'off' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, {})
     const w = world(on, answers())
@@ -452,7 +452,7 @@ describe('automatic probe', () => {
     expect(aliases).toEqual([])
   })
 
-  test('auto_probe off is kept in $.store', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint' } }, async ($, on) => {
+  test('auto_probe off is kept in $.store', { options: { typesafe_api_key: FAKE_KEY } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, { advanced: { auto_probe: false } })
     const w = world(on, answers())
@@ -555,7 +555,7 @@ describe('skill selection switch', () => {
 })
 
 describe('settings kept off the page', () => {
-  test('set applies at once, unset restores the default, bad values change nothing', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true } }, async ($, on) => {
+  test('set applies at once, unset restores the default, bad values change nothing', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, {})
     const w = world(on, answers({ 'opus::high': 0.9 }))
@@ -574,7 +574,7 @@ describe('settings kept off the page', () => {
     expect(requestChars()).toBe(1000)
   })
 
-  test('an effort description keeps its case and spaces, and settings lists the change', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true } }, async ($, on) => {
+  test('an effort description keeps its case and spaces, and settings lists the change', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
     const w = world(on, answers({ 'opus::high': 0.9 }))
@@ -588,7 +588,7 @@ describe('settings kept off the page', () => {
     expect(list).toContain('timeout_ms = 9000  [default]')
   })
 
-  test('an unknown name is refused with the list', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint' } }, async ($, on) => {
+  test('an unknown name is refused with the list', { options: { typesafe_api_key: FAKE_KEY } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, {})
     world(on, answers({ 'opus::high': 0.9 }))
@@ -599,7 +599,7 @@ describe('settings kept off the page', () => {
 })
 
 describe('reset to defaults', () => {
-  test('/jev-model defaults restores changed settings, keeps the API key and switches the flag off', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true } }, async ($, on) => {
+  test('/jev-model defaults restores changed settings, keeps the API key and switches the flag off', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
     mock.clock(on)
     const w = world(on, answers({ 'opus::high': 0.9 }))
 
@@ -684,7 +684,7 @@ describe('turn note', () => {
   // The engine's own answer for a turn: the model's text, shown as it is.
   const complete = (on: On) => on('turn.complete', () => ({ text: 'hi' }) as never)
 
-  test('a switched turn says which model answered and what Jev chose', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true, model_routing: 'on' } }, async ($, on) => {
+  test('a switched turn says which model answered and what Jev chose', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
     const w = world(on, answers({ 'haiku::low': 0.9 }))
@@ -699,7 +699,7 @@ describe('turn note', () => {
     expect(done.text).toBe(`jev-router: answered by ${HAIKU} · requested effort low · cheapest feasible haiku/low, cost unknown`)
   })
 
-  test('a fallback turn names the fallback', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true, model_routing: 'on', fallback_model: 'haiku' } }, async ($, on) => {
+  test('a fallback turn names the fallback', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on', fallback_model: 'haiku' } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
     const w = world(on, () => ({ status: 500, body: {} }))
@@ -714,7 +714,7 @@ describe('turn note', () => {
     expect(done.text).toContain('fallback haiku (no-jev-answer)')
   })
 
-  test('a dry-run turn says nothing was switched', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true } }, async ($, on) => {
+  test('a dry-run turn says nothing was switched', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
     const w = world(on, answers({ 'haiku::low': 0.9 }))
@@ -740,7 +740,7 @@ describe('a bigger tier is never rated below a smaller one', () => {
     expect(raw.sonnet.low).toBe(0.1)
   })
 
-  test('what Sonnet can do Opus can too: the likelier of the cheaper pairs is not undercut by an inverted Opus', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', model_routing: 'on', write_log: true } }, async ($, on) => {
+  test('what Sonnet can do Opus can too: the likelier of the cheaper pairs is not undercut by an inverted Opus', { options: { typesafe_api_key: FAKE_KEY, model_routing: 'on', write_log: true } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
     const w = world(on, answers({ 'sonnet::medium': 0.9 }))
@@ -752,7 +752,7 @@ describe('a bigger tier is never rated below a smaller one', () => {
     expect(round.jev_feasible_raw.opus.medium).toBe(0.1)
   })
 
-  test('tier_monotonic off uses Jev\'s ratings as given and records no raw copy', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', model_routing: 'on', write_log: true } }, async ($, on) => {
+  test('tier_monotonic off uses Jev\'s ratings as given and records no raw copy', { options: { typesafe_api_key: FAKE_KEY, model_routing: 'on', write_log: true } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, { ...LEARNED, advanced: { tier_monotonic: false } })
     const w = world(on, answers({ 'sonnet::medium': 0.9 }))

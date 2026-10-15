@@ -1,12 +1,12 @@
 {
   "name": "jev-local",
   "owner": { "name": "Darkisu.Su" },
-  "description": "Local plugins: the TypeSafe Jev skill router",
+  "description": "Local plugins: the TypeSafe Jev router",
   "plugins": [
     {
       "name": "jev-router",
       "source": "./plugins/jev-router",
-      "description": "Routes each new prompt through TypeSafe Jev to suggest a local skill"
+      "description": "Routes skills and models with TypeSafe Jev and supplies automatic assistant-owned typed decisions throughout a task"
     }
   ]
 }

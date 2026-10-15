@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import { FAKE_KEY, memoryStore, world } from './testkit'
 import { SAVE_TOOL } from './tools'
 
-const options = { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true, model_routing: 'off' }
+const options = { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'off' }
 // The mocked clock starts at 0, so the plugin's UTC day is 1970-01-01.
 const TODAY = '1970-01-01'
 const DATA_DIR = 'C:/fakehome/.claude/plugins/data/jev-router-jev-local/logs'

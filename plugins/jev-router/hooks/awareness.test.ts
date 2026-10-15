@@ -170,7 +170,7 @@ describe('pair costs', () => {
   })
 })
 
-const options = { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', write_log: true, model_routing: 'on' }
+const options = { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'on' }
 // Jev's feasibility per 'tier::effort'; every other pair asked is judged unable.
 const answer = (feasible: Record<string, number> = {}) => (questions: Record<string, unknown>) => {
   const body: any = 'acts_on_user_system' in questions ? rankWide(0.9, 'speckit-specify', feasible, questions) : rerank(questions, { 'speckit-specify': 0.9 })

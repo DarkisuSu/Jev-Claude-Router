@@ -70,20 +70,6 @@
       "max": 1,
       "default": 0.3
     },
-    "consult_skill_text": {
-      "type": "boolean",
-      "title": "Skill · Deliver skill text in consult",
-      "description": "consult returns the SKILL.md text of the skills Jev picks, so a skill can be hidden from Claude (the listing costs tokens) and still be used when Jev picks it. The text is not a native skill load: files beside the skill and its tool limits do not apply. Off: consult returns names only and Claude loads them with the Skill tool.\\nDefault: on",
-      "default": true
-    },
-    "consult_refusals": {
-      "type": "number",
-      "title": "Skill · Refusals before a call is let through",
-      "description": "How many calls are refused for want of a consult before the agent is let through, so a session that cannot consult is never stuck. A consult starts the count over. A subagent is let through after at most 2.\nDefault: 3",
-      "min": 1,
-      "max": 10,
-      "default": 3
-    },
     "skill_trim_hint": {
       "type": "boolean",
       "title": "Skill · Remind me to trim project skills",
@@ -95,16 +81,6 @@
       "title": "General · Show choices in the conversation",
       "description": "Add a line to the conversation, which you see and the model does not read, saying what Jev chose for each message: model and effort, skill, saved tool. The status line shows it too, where the host draws one.\nDefault: on",
       "default": true
-    },
-    "selection_mode": {
-      "type": "string",
-      "title": "Skill & Tool · Selection mode",
-      "description": "consult: Claude is shown neither the skill list nor the saved tools; it asks Jev with the consult tool at the start of every message and chooses among what Jev returns, so the exchange shows in the conversation. prehint: Jev picks a skill or saved tool while your prompt is sent, and the picks ride beside it. Model and effort are always chosen as the prompt is sent.\nDefault: consult",
-      "options": [
-        "consult",
-        "prehint"
-      ],
-      "default": "consult"
     },
     "tool_routing": {
       "type": "boolean",
