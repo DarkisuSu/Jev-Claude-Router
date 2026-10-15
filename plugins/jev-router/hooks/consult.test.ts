@@ -103,7 +103,7 @@ describe('consult mode', () => {
     // No model question rides a consult: model choice is made as the prompt is sent.
     expect(Object.keys(asked[0].questions).some(k => k.startsWith('feasible::'))).toBe(false)
     expect(asked[0].state.request).toBe('convert the CSV export to JSON')
-    expect(w.status.at(-1)).toBe('jev: consulted · skill speckit-specify · tool csv_to_json')
+    expect(w.status.at(-1)).toBe('jev: model off · skill speckit-specify · tool csv_to_json')
     expect(logLines(w).find(l => l.type === 'consult')).toMatchObject({ outcome: 'picked', tools: { picked: [{ name: 'csv_to_json' }] } })
   })
   test('nothing fitting is answered as such', { options: { ...CONSULT, tool_save_threshold: 0 } }, async ($, on) => {
@@ -111,6 +111,7 @@ describe('consult mode', () => {
     const w = world(on, jevFor({ skill: 0.05 }))
     await saved($, w)
     expect(outcome(await consult($)).status).toBe('nothing_fits')
+    expect(w.status.at(-1)).toBe('jev: model off · skill none · tool none')
   })
   test('with nothing to choose from it says so without asking Jev', { options: { ...CONSULT, skill_routing: false } }, async ($, on) => {
     mock.clock(on); memoryStore(on)

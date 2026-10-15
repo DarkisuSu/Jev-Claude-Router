@@ -226,6 +226,8 @@ const S: {
   pending?: Round
   // Saved tools suggested for the running turn, until the shell runs one.
   hintedTools: SavedTool[]
+  // The model line of the latest message, for the status line a consult completes.
+  chosenModel: string
   writes: Promise<void>
   roundSeq: number
   available: Available
@@ -271,6 +273,7 @@ const S: {
   hiddenLoaded: false,
   probeQueue: [],
   hintedTools: [],
+  chosenModel: '',
   probeAgents: new Set(),
   autoProbed: new Set(),
   turnProbes: new Map(),
@@ -1241,6 +1244,7 @@ async function consultCall($: EngineInterface, input: unknown): Promise<ConsultR
     () => $.clock.now(),
   )
   if (result.outcome === 'error') {
+    await consultNotice($, 'skill unavailable · tool unavailable')
     await log($, { type: 'consult', outcome: 'error', reason: result.reason, task_chars: sent.length, jev_calls: result.calls, total_ms: (await $.clock.now()) - started })
     return { status: 'unavailable', reason: result.reason ?? 'jev failure' }
   }
@@ -1265,7 +1269,7 @@ async function consultCall($: EngineInterface, input: unknown): Promise<ConsultR
     jev_calls: result.calls,
     total_ms: (await $.clock.now()) - started,
   })
-  $.ui.status(`jev: consulted · skill ${result.selected.map(s => s.name).join(', ') || '-'} · tool ${pickedTools.map(p => p.tool.name).join(', ') || '-'}`)
+  await consultNotice($, `skill ${result.selected.map(s => s.name).join(', ') || 'none'} · tool ${pickedTools.map(p => p.tool.name).join(', ') || 'none'}`)
   if (result.selected.length + pickedTools.length === 0) return { status: 'nothing_fits', reason: result.reason }
   return {
     status: 'picked',
@@ -1276,6 +1280,14 @@ async function consultCall($: EngineInterface, input: unknown): Promise<ConsultR
 
 // Whether a text lists skills (a name every skill list here has): diagnostic only.
 const mentionsSkills = (text: unknown) => typeof text === 'string' && /speckit-|anthropic-skills:|typesafe:typesafe-ai/.test(text)
+
+// What a consult found, on the status line and in the conversation, beside the
+// model of the message: "none" says nothing was picked, as plainly as a pick.
+async function consultNotice($: EngineInterface, found: string) {
+  const line = `model ${S.chosenModel || 'off'} · ${found}`
+  $.ui.status(`jev: ${line}`)
+  if (S.config.chatNotice) await chatNotice($, `jev-router: consulted · ${line}`)
+}
 
 // A line in the conversation that the person sees and the model never reads.
 async function chatNotice($: EngineInterface, text: string) {
@@ -1725,6 +1737,7 @@ export const register: Register = (on, options) => {
       // shows are the session's and cannot be set from a mod.
       const chose = `${decision.family ?? `keep(${decision.modelReason ?? '-'})`}/${decision.effort ?? `keep(${decision.effortReason ?? '-'})`}`
       chosen = `${chose}${config.routing === 'dry-run' ? ' (dry-run)' : ''}`
+      S.chosenModel = chosen
       $.ui.status(`jev: model ${chosen}`)
     }
 
