@@ -1527,6 +1527,13 @@ export const register: Register = (on, options) => {
     return sections === result.sections ? result : { ...result, sections }
   }).catch(($, e, next) => next(e))
 
+  // Which attachments the engine raises, by type and size alone: shows whether
+  // the skill list comes through here. Written only when logging is on.
+  on('prompt.attachment', async ($, e, next) => {
+    await log($, { type: 'attachment', kind: String((e as { type?: unknown }).type), chars: typeof e.text === 'string' ? e.text.length : 0 })
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   // Consult mode: Claude is not shown the skill list; Jev names what fits.
   // Only while skill selection is on, or Claude would have no way to find a skill.
   on('prompt.attachment', { type: 'skill_listing' }, async ($, e, next) => {
