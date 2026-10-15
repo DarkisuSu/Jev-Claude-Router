@@ -46,6 +46,7 @@ import { SHARED, parseSetting, settingValue, sharedConfig } from './settings'
 import { JevError, route, type RouteResult, type Send } from './router'
 import { EMPTY_ATTEMPT, STATE_CHAR_BUDGET, STATE_RESERVE, recentContext, routingFacts, scrubText, type AttemptFacts } from './awareness'
 import { CONSULT_DESCRIPTION, CONSULT_SCHEMA, CONSULT_TOOL, consultInstructions, consultText, prepareConsult, skillTexts, type ConsultResult } from './consult'
+import { applyHide, hiddenNames, overridesOf } from './hide'
 import { DECISION_TOOL, DECISION_DESCRIPTION, DECISION_INSTRUCTIONS, DECISION_SCHEMA, decisionText, prepareDecision, evaluateDecision } from './decisions'
 import {
   BODY_CHARS,
@@ -90,6 +91,7 @@ type Config = {
   selectionMode: 'prehint' | 'consult'
   consultSkillText: boolean
   chatNotice: boolean
+  skillTrimHint: boolean
   probeWaitMs: number
   tools: ReturnType<typeof sharedConfig>['tools']
   decisionConfidence: number
@@ -500,6 +502,95 @@ async function scanFolder($: EngineInterface, root: string, prefix: string, into
     const key = prefix + (found.name ?? entry.name)
     if (!into.has(key)) into.set(key, found)
   }
+}
+
+// /jev-skills: send only the names of the project's skills in Claude's skill
+// listing, not their descriptions (they cost tokens on every request), or list
+// them in full again. The skills stay loadable by name. Written to the
+// project's local settings file, apart from Git.
+// The project's skills and its local settings file: where the skillOverrides
+// live. Undefined when the session has no folder.
+async function projectSkillState($: EngineInterface) {
+  let cwd: string
+  try {
+    cwd = norm(await $.session.cwd())
+  } catch {
+    return undefined
+  }
+  const file = `${cwd}/.claude/settings.local.json`
+  const found = new Map<string, Found>()
+  let dir: string | undefined = cwd
+  for (let i = 0; dir && i < PROJECT_DEPTH; i++, dir = parent(dir)) await scanFolder($, `${dir}/.claude/skills`, '', found)
+  let settings: unknown = {}
+  let readable = true
+  try {
+    settings = JSON.parse(await $.fs.read(file))
+  } catch {
+    // A missing file is an empty one; one that exists but does not parse is left alone.
+    readable = !(await $.fs.exists(file))
+  }
+  return { cwd, file, names: [...found.keys()], settings, readable }
+}
+
+// Every session, while some project skill still sends its full description:
+// say so once, with the command that fixes it. Nothing is written.
+async function skillTrimHint($: EngineInterface) {
+  if (!S.config.enabled || !S.config.skillTrimHint) return
+  try {
+    const state = await projectSkillState($)
+    if (!state?.readable) return
+    const overrides = overridesOf(state.settings)
+    const full = state.names.filter(n => overrides[n] === undefined)
+    if (full.length === 0) return
+    const text = `jev-router: ${full.length} project skill${full.length === 1 ? ' sends its' : 's send their'} full description to Claude on every request. /jev-skills hide all sends names only and saves those tokens (nothing is written until you run it).`
+    $.ui.toast(text)
+    if (S.config.chatNotice) await chatNotice($, text)
+  } catch {
+    // A hint only.
+  }
+}
+
+async function skillsCommand($: EngineInterface, raw: string): Promise<string> {
+  const args = raw.trim().split(/\s+/).filter(Boolean)
+  const verb = args[0] ?? 'status'
+  const usage = 'jev-router: /jev-skills [status | hide <name ... | all> | show <name ... | all>]'
+  if (!['status', 'hide', 'show'].includes(verb)) return usage
+  const state = await projectSkillState($)
+  if (!state) return 'jev-router: this session has no project folder.'
+  const { cwd, file, names, settings, readable } = state
+  const hidden = new Set(hiddenNames(settings))
+
+  if (verb === 'status') {
+    const lines = [
+      `jev-router project skills (${names.length}) in ${cwd}/.claude/skills and above. Description left out of Claude's listing: ${names.filter(n => hidden.has(n)).length}.`,
+      ...names.map(n => `  ${n}${hidden.has(n) ? ' [name only]' : ''}`),
+      'Name only: /jev-skills hide <name ... | all>. Full listing again: /jev-skills show <name ... | all>. Takes effect in a new session; the skills stay loadable by name. Only skills set here are touched.',
+      'Plugin skills (typesafe, anthropic-skills) and Claude Code\'s own are not affected by this setting.',
+    ]
+    if (names.length === 0) lines.splice(1, 0, '  (none found)')
+    return lines.join('\n')
+  }
+
+  const wanted = args.slice(1)
+  if (wanted.length === 0) return usage
+  const targets = wanted.includes('all') ? names : wanted.filter(n => names.includes(n))
+  const unknown = wanted.filter(n => n !== 'all' && !names.includes(n))
+  if (!readable) return `jev-router: ${file} exists but is not valid JSON, so it was left alone. Fix it first.`
+  if (targets.length === 0) return `jev-router: no such project skill: ${unknown.join(', ')}. See /jev-skills.`
+  const next = applyHide(settings, targets, verb as 'hide' | 'show')
+  if (next.changed.length > 0) {
+    try {
+      await $.fs.write(file, `${JSON.stringify(next.settings, null, 2)}\n`)
+    } catch (err) {
+      return `jev-router: could not write ${file}: ${err instanceof Error ? err.message.slice(0, 120) : 'error'}`
+    }
+  }
+  await log($, { type: 'skills', action: verb, changed: next.changed.length })
+  return [
+    next.changed.length > 0 ? `jev-router: ${verb === 'hide' ? 'name only in Claude\'s listing' : 'listed in full again'}: ${next.changed.join(', ')}. Written to ${file}; it takes effect in a new session.` : `jev-router: nothing to ${verb}.`,
+    ...(next.skipped.length > 0 ? [`Left alone (set to another value in that file): ${next.skipped.join(', ')}.`] : []),
+    ...(unknown.length > 0 ? [`No such project skill: ${unknown.join(', ')}.`] : []),
+  ].join('\n')
 }
 
 async function scanFiles($: EngineInterface) {
@@ -1515,6 +1606,7 @@ export const register: Register = (on, options) => {
       argumentHint: '[status | clear logs [today|all] | clear learned | clear tools [project|global|all] [--keep-files] | clear all [--keep-files]]',
     })
     await $.command.register({ name: 'jev-index', description: 'Show the skills the Jev router can pick from' })
+    await $.command.register({ name: 'jev-skills', description: 'Send only the names of project skills in Claude\'s skill listing, not their descriptions, or list them in full again', argumentHint: '[status | hide <name ... | all> | show <name ... | all>]' })
     await $.command.register({
       name: 'jev-tool',
       description: 'Saved tools Jev can suggest: list, show, clear, switches',
@@ -1537,6 +1629,7 @@ export const register: Register = (on, options) => {
     await refreshModels($)
     await loadCaps($)
     await loadHidden($)
+    await skillTrimHint($)
     if (config.enabled && config.key && config.tools.save) {
       await $.tool.register({ name: 'save_tool', description: SAVE_DESCRIPTION, inputSchema: SAVE_SCHEMA, isDeferred: false })
     }
@@ -1643,6 +1736,7 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'jev-tool' }, async ($, e) => ({ text: await toolCommand($, e.args) }))
+  on('command.run', { command: 'jev-skills' }, async ($, e) => ({ text: await skillsCommand($, e.args) }))
 
   on('tool.call', { tool: 'mcp__jev-router__decide' }, async ($, e) => {
     const input = { decision_owner: e.decision_owner, authority: e.authority, state: e.state, questions: e.questions }

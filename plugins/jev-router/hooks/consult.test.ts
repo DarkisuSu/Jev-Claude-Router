@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
+import { HIDDEN, applyHide, hiddenNames } from './hide'
 import { CONSULT_TOOL, SKILL_TEXT_CHARS, SKILL_TEXT_TOTAL, consultInstructions, prepareConsult, skillTexts } from './consult'
 import { SAVE_TOOL } from './tools'
 import { FAKE_KEY, logLines, memoryStore, PROMPT, rankWide, rerank, world, type World } from './testkit'
@@ -319,5 +320,130 @@ describe('every skill and saved tool during the work goes through Jev', () => {
     mock.clock(on); memoryStore(on); beneathTools(on)
     world(on, jevFor())
     expect(refused(await skill($, 'speckit-plan'))).toBe(false)
+  })
+})
+
+describe('cutting project skills to a name', () => {
+  test('applyHide changes only skillOverrides, only for the named skills, and never a value the person set', () => {
+    const settings = { permissions: { allow: ['x'] }, skillOverrides: { mine: 'off', a: HIDDEN } }
+    const hid = applyHide(settings, ['a', 'b', 'mine'], 'hide')
+    expect(hid.changed).toEqual(['b'])
+    expect(hid.skipped).toEqual(['mine'])
+    expect(hid.settings).toEqual({ permissions: { allow: ['x'] }, skillOverrides: { mine: 'off', a: HIDDEN, b: HIDDEN } })
+    const shown = applyHide(hid.settings, ['a', 'b', 'mine'], 'show')
+    expect(shown.changed).toEqual(['a', 'b'])
+    expect(shown.skipped).toEqual(['mine'])
+    expect(shown.settings).toEqual({ permissions: { allow: ['x'] }, skillOverrides: { mine: 'off' } })
+    // Nothing left: the key goes too. Input is not mutated.
+    expect(applyHide({ skillOverrides: { a: HIDDEN } }, ['a'], 'show').settings).toEqual({})
+    expect(settings.skillOverrides).toEqual({ mine: 'off', a: HIDDEN })
+    expect(hiddenNames(hid.settings).sort()).toEqual(['a', 'b'])
+    expect(applyHide(undefined, ['a'], 'hide').settings).toEqual({ skillOverrides: { a: HIDDEN } })
+    expect(HIDDEN).toBe('name-only')
+  })
+
+  const DIR = 'C:/fakeproject/.claude'
+  const SETTINGS = `${DIR}/settings.local.json`
+  const run = ($: Engine, args: string) => $.command.run({ command: 'jev-skills', args } as never).then(r => r.text as string)
+  const project = (w: World) => {
+    for (const n of ['plan', 'tasks']) w.written.set(`${DIR}/skills/speckit-${n}/SKILL.md`, `---\nname: speckit-${n}\ndescription: ${n} things\n---\nDo ${n}.`)
+  }
+
+  test('hide writes the project settings, keeping what is there; show takes it back', { options: CONSULT }, async ($, on) => {
+    mock.clock(on); memoryStore(on)
+    const w = world(on, jevFor()); project(w)
+    w.written.set(SETTINGS, JSON.stringify({ permissions: { allow: ['Bash(ls)'] } }))
+    expect(await run($, '')).toContain('project skills (2)')
+    const out = await run($, 'hide all')
+    expect(out).toContain("name only in Claude's listing: speckit-plan, speckit-tasks")
+    expect(JSON.parse(w.written.get(SETTINGS)!)).toEqual({ permissions: { allow: ['Bash(ls)'] }, skillOverrides: { 'speckit-plan': HIDDEN, 'speckit-tasks': HIDDEN } })
+    expect(await run($, '')).toContain('speckit-plan [name only]')
+    expect(await run($, 'show speckit-plan')).toContain('listed in full again: speckit-plan')
+    expect(JSON.parse(w.written.get(SETTINGS)!).skillOverrides).toEqual({ 'speckit-tasks': HIDDEN })
+    expect(await run($, 'hide speckit-plan nope')).toContain('No such project skill: nope')
+    expect(logLines(w).filter(l => l.type === 'skills').map(l => l.action)).toEqual(['hide', 'show', 'hide'])
+  })
+  test('a missing settings file is created', { options: CONSULT }, async ($, on) => {
+    mock.clock(on); memoryStore(on)
+    const w = world(on, jevFor()); project(w)
+    await run($, 'hide speckit-tasks')
+    expect(JSON.parse(w.written.get(SETTINGS)!)).toEqual({ skillOverrides: { 'speckit-tasks': HIDDEN } })
+  })
+  test('it works in any selection mode: the skills stay loadable by name', { options: { ...CONSULT, selection_mode: 'prehint' } }, async ($, on) => {
+    mock.clock(on); memoryStore(on)
+    const w = world(on, jevFor()); project(w)
+    expect(await run($, 'hide all')).toContain('speckit-plan')
+    expect(w.written.has(SETTINGS)).toBe(true)
+  })
+  test('a settings file that is not JSON is left alone', { options: CONSULT }, async ($, on) => {
+    mock.clock(on); memoryStore(on)
+    const w = world(on, jevFor()); project(w)
+    w.written.set(SETTINGS, '{ not json')
+    expect(await run($, 'hide all')).toContain('not valid JSON')
+    expect(w.written.get(SETTINGS)).toBe('{ not json')
+  })
+  test('a skill the person set to another value is left alone', { options: CONSULT }, async ($, on) => {
+    mock.clock(on); memoryStore(on)
+    const w = world(on, jevFor()); project(w)
+    w.written.set(SETTINGS, JSON.stringify({ skillOverrides: { 'speckit-plan': 'off' } }))
+    const out = await run($, 'hide all')
+    expect(out).toContain('Left alone')
+    expect(JSON.parse(w.written.get(SETTINGS)!).skillOverrides).toEqual({ 'speckit-plan': 'off', 'speckit-tasks': HIDDEN })
+  })
+  test('usage on a bad verb or no name', { options: CONSULT }, async ($, on) => {
+    mock.clock(on); memoryStore(on); world(on, jevFor())
+    expect(await run($, 'wipe')).toContain('/jev-skills [status')
+    expect(await run($, 'hide')).toContain('/jev-skills [status')
+  })
+
+  const noticeTexts = (session: { appended: () => readonly { message: unknown }[] }) =>
+    session.appended().map(r => ((r.message as { content?: { text?: string }[] }).content ?? []).map(b => b.text ?? '').join(''))
+
+  test('every session start says so while a project skill sends its full description, and writes nothing', { options: CONSULT }, async ($, on) => {
+    mock.clock(on); memoryStore(on)
+    const session = mock.session(on)
+    const w = world(on, jevFor()); project(w)
+    beneath(on)
+    await start($)
+    expect(noticeTexts(session).some(x => x.includes('2 project skills send their full description') && x.includes('/jev-skills hide all'))).toBe(true)
+    expect(w.written.has(SETTINGS)).toBe(false)
+    // Again at the next start, until it is done.
+    await start($)
+    expect(noticeTexts(session).filter(x => x.includes('/jev-skills hide all'))).toHaveLength(2)
+  })
+  test('a skill already cut to a name, or set by the person, is not counted; none left, no reminder', { options: CONSULT }, async ($, on) => {
+    mock.clock(on); memoryStore(on)
+    const session = mock.session(on)
+    const w = world(on, jevFor()); project(w)
+    w.written.set(SETTINGS, JSON.stringify({ skillOverrides: { 'speckit-plan': HIDDEN, 'speckit-tasks': 'off' } }))
+    beneath(on)
+    await start($)
+    expect(noticeTexts(session).some(x => x.includes('/jev-skills hide all'))).toBe(false)
+  })
+  test('one left is counted as one', { options: CONSULT }, async ($, on) => {
+    mock.clock(on); memoryStore(on)
+    const session = mock.session(on)
+    const w = world(on, jevFor()); project(w)
+    w.written.set(SETTINGS, JSON.stringify({ skillOverrides: { 'speckit-plan': HIDDEN } }))
+    beneath(on)
+    await start($)
+    expect(noticeTexts(session).some(x => x.includes('1 project skill sends its full description'))).toBe(true)
+  })
+  test('skill_trim_hint off, or a settings file that is not JSON: no reminder', { options: { ...CONSULT, skill_trim_hint: false } }, async ($, on) => {
+    mock.clock(on); memoryStore(on)
+    const session = mock.session(on)
+    const w = world(on, jevFor()); project(w)
+    beneath(on)
+    await start($)
+    expect(noticeTexts(session).some(x => x.includes('/jev-skills hide all'))).toBe(false)
+  })
+  test('a settings file that is not JSON gets no reminder', { options: CONSULT }, async ($, on) => {
+    mock.clock(on); memoryStore(on)
+    const session = mock.session(on)
+    const w = world(on, jevFor()); project(w)
+    w.written.set(SETTINGS, '{ not json')
+    beneath(on)
+    await start($)
+    expect(noticeTexts(session).some(x => x.includes('/jev-skills hide all'))).toBe(false)
   })
 })

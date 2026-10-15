@@ -76,6 +76,12 @@
       "description": "consult returns the SKILL.md text of the skills Jev picks, so a skill can be hidden from Claude (the listing costs tokens) and still be used when Jev picks it. The text is not a native skill load: files beside the skill and its tool limits do not apply. Off: consult returns names only and Claude loads them with the Skill tool.\\nDefault: on",
       "default": true
     },
+    "skill_trim_hint": {
+      "type": "boolean",
+      "title": "Skill · Remind me to trim project skills",
+      "description": "At each session start, say so when a project skill still sends its full description to Claude on every request, and name the command that sends names only (/jev-skills hide all). Nothing is written until you run it.\\nDefault: on",
+      "default": true
+    },
     "chat_notice": {
       "type": "boolean",
       "title": "General · Show choices in the conversation",
