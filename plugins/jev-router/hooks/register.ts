@@ -1274,6 +1274,9 @@ async function consultCall($: EngineInterface, input: unknown): Promise<ConsultR
   }
 }
 
+// Whether a text lists skills (a name every skill list here has): diagnostic only.
+const mentionsSkills = (text: unknown) => typeof text === 'string' && /speckit-|anthropic-skills:|typesafe:typesafe-ai/.test(text)
+
 // A line in the conversation that the person sees and the model never reads.
 async function chatNotice($: EngineInterface, text: string) {
   try {
@@ -1514,6 +1517,7 @@ export const register: Register = (on, options) => {
   // after compaction. Only add it to prompts actually offering the tool.
   on('prompt.compose', async ($, e, next) => {
     const result = await next(e)
+    await log($, { type: 'attachment', kind: 'compose', sections: result.sections.map(x => ({ id: x.id, chars: x.text.length, has_skill_names: mentionsSkills(x.text) })) })
     if (!config.enabled || !config.key) return result
     let sections = result.sections
     const add = (id: string, text: string) => {
@@ -1530,7 +1534,19 @@ export const register: Register = (on, options) => {
   // Which attachments the engine raises, by type and size alone: shows whether
   // the skill list comes through here. Written only when logging is on.
   on('prompt.attachment', async ($, e, next) => {
-    await log($, { type: 'attachment', kind: String((e as { type?: unknown }).type), chars: typeof e.text === 'string' ? e.text.length : 0 })
+    await log($, { type: 'attachment', kind: String((e as { type?: unknown }).type), chars: typeof e.text === 'string' ? e.text.length : 0, has_skill_names: mentionsSkills(e.text) })
+    return next(e)
+  }).catch(($, e, next) => next(e))
+  on('prompt.section', async ($, e, next) => {
+    await log($, { type: 'attachment', kind: `section:${e.name}`, chars: typeof e.text === 'string' ? e.text.length : 0, has_skill_names: mentionsSkills(e.text) })
+    return next(e)
+  }).catch(($, e, next) => next(e))
+  on('prompt.context', async ($, e, next) => {
+    await log($, { type: 'attachment', kind: 'context', blocks: e.blocks.map(b => ({ name: b.name, chars: b.text.length, has_skill_names: mentionsSkills(b.text) })) })
+    return next(e)
+  }).catch(($, e, next) => next(e))
+  on('tool.describe', { tool: 'Skill' }, async ($, e, next) => {
+    await log($, { type: 'attachment', kind: 'tool.describe:Skill', chars: e.description.length, has_skill_names: mentionsSkills(e.description) })
     return next(e)
   }).catch(($, e, next) => next(e))
 
