@@ -192,4 +192,12 @@ describe('the skill list the engine adds', () => {
     on('prompt.attachment', (_, e) => ({ text: e.text }))
     expect((await listing($)).text).toBe('- speckit-plan: plans')
   })
+  test('a session in consult mode asks the engine to ask about its attachments again', { options: CONSULT }, async ($, on) => {
+    mock.clock(on); memoryStore(on); world(on, jevFor())
+    const dropped: string[] = []
+    on('ui.invalidate', (_, e) => { dropped.push(String((e as { event?: unknown }).event)); return { value: undefined } as never })
+    beneath(on)
+    await start($)
+    expect(dropped).toContain('prompt.attachment')
+  })
 })

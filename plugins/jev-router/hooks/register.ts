@@ -1481,6 +1481,9 @@ export const register: Register = (on, options) => {
     if (config.enabled && config.key && config.tools.save) {
       await $.tool.register({ name: 'save_tool', description: SAVE_DESCRIPTION, inputSchema: SAVE_SCHEMA, isDeferred: false })
     }
+    // The engine keeps its answer for a skill listing it already asked about:
+    // drop it, so the listing is asked again and left out in consult mode.
+    if (config.enabled && config.key && config.selectionMode === 'consult' && config.skillRouting) $.ui.invalidate('prompt.attachment')
     if (config.enabled && config.key && config.selectionMode === 'consult' && (config.skillRouting || config.tools.routing)) {
       await $.tool.register({ name: 'consult', description: CONSULT_DESCRIPTION, inputSchema: CONSULT_SCHEMA, isDeferred: false })
     }
@@ -1527,7 +1530,10 @@ export const register: Register = (on, options) => {
   // Consult mode: Claude is not shown the skill list; Jev names what fits.
   // Only while skill selection is on, or Claude would have no way to find a skill.
   on('prompt.attachment', { type: 'skill_listing' }, async ($, e, next) => {
-    if (config.enabled && config.key && config.selectionMode === 'consult' && config.skillRouting) return { text: null }
+    if (config.enabled && config.key && config.selectionMode === 'consult' && config.skillRouting) {
+      await log($, { type: 'attachment', kind: 'skill_listing', left_out: true, chars: typeof e.text === 'string' ? e.text.length : 0 })
+      return { text: null }
+    }
     return next(e)
   }).catch(($, e, next) => next(e))
 
