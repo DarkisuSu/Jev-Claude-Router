@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import { HIDDEN, applyHide, hiddenNames } from './hide'
-import { CONSULT_TOOL, SKILL_TEXT_CHARS, SKILL_TEXT_TOTAL, consultInstructions, prepareConsult, skillTexts } from './consult'
+import { CONSULT_FREE_TOOLS, CONSULT_TOOL, NOT_FREE_TOOL, SKILL_TEXT_CHARS, SKILL_TEXT_TOTAL, consultInstructions, prepareConsult, skillTexts } from './consult'
 import { SAVE_TOOL } from './tools'
 import { FAKE_KEY, logLines, memoryStore, PROMPT, rankWide, rerank, world, type World } from './testkit'
 
@@ -28,6 +28,10 @@ describe('consult instructions and input', () => {
     expect(Object.values(many).reduce((n, v) => n + v.length, 0)).toBeLessThanOrEqual(SKILL_TEXT_TOTAL)
     expect(consultInstructions(true)).toContain('do not load it again with the Skill tool')
   })
+  test('the matcher for tools that need a consult agrees with the set of tools that do not', () => {
+    for (const tool of CONSULT_FREE_TOOLS) expect(NOT_FREE_TOOL.test(tool)).toBe(false)
+    for (const tool of ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash', 'PowerShell', 'Agent', 'Skill', 'WebFetch', 'mcp__other__tool', 'ReadFile', 'MyRead']) expect(NOT_FREE_TOOL.test(tool)).toBe(true)
+  })
   test('a task is required, flattened to one line', () => {
     expect(prepareConsult({ task: '  fix\n the   ledger ' })).toEqual({ task: 'fix the ledger' })
     expect(prepareConsult({})).toMatchObject({ status: 'invalid_request' })
@@ -36,10 +40,14 @@ describe('consult instructions and input', () => {
 })
 
 const CONSULT = { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'off', selection_mode: 'consult' }
-type Jev = { tool?: Record<string, number>; skill?: number; fail?: boolean }
+// `continues`: Jev's answer to "does this continue the work underway" (left out when absent);
+// `same`: its answer to "is this action part of the work"; `sameFails`: that one question fails.
+type Jev = { tool?: Record<string, number>; skill?: number; fail?: boolean; continues?: number; same?: number; sameFails?: boolean }
 const jevFor = (j: Jev = {}) => (q: Record<string, unknown>) => {
+  if ('same_work' in q) return j.sameFails ? { status: 500, body: {} } : { status: 200, body: { model: 'jev-test-1', answers: { same_work: { type: 'noul', noul: j.same ?? 0.9 } } } }
   if (j.fail) return { status: 500, body: {} }
   const body: any = 'acts_on_user_system' in q ? rankWide(0.9, 'speckit-specify', {}, q) : rerank(q, { 'speckit-specify': j.skill ?? 0.9 })
+  if ('continues' in q && j.continues !== undefined) body.answers.continues = { type: 'noul', noul: j.continues }
   if ('tool_which' in q) {
     const probabilities = j.tool ?? { none: 1 }
     body.answers.tool_which = { type: 'choice', choice: Object.entries(probabilities).sort((a, b) => b[1] - a[1])[0]![0], probabilities, confidence: 0.8 }
@@ -231,11 +239,13 @@ describe('every skill and saved tool during the work goes through Jev', () => {
     const before = await skill($, 'speckit-specify')
     expect(refused(before)).toBe(true)
     expect(JSON.stringify(before)).toContain(CONSULT_TOOL)
-    expect(logLines(w).find(l => l.type === 'consult' && l.outcome === 'denied')).toMatchObject({ kind: 'skill', name: 'speckit-specify' })
+    // Before any consult, the refusal is the general one: nothing but reading runs.
+    expect(logLines(w).find(l => l.type === 'consult' && l.outcome === 'denied')).toMatchObject({ kind: 'unconsulted', name: 'Skill' })
     await consult($)
     expect(refused(await skill($, 'speckit-specify'))).toBe(false)
     // Only what Jev returned.
     expect(refused(await skill($, 'speckit-plan'))).toBe(true)
+    expect(logLines(w).filter(l => l.type === 'consult' && l.outcome === 'denied').at(-1)).toMatchObject({ kind: 'skill', name: 'speckit-plan' })
   })
   test('a later consult in the same work adds to what is allowed', { options: OPTS }, async ($, on) => {
     mock.clock(on); memoryStore(on); beneathTools(on)
@@ -270,13 +280,21 @@ describe('every skill and saved tool during the work goes through Jev', () => {
     expect(refused(await skill($, 'speckit-plan'))).toBe(false)
     expect(refused(await bash($, 'python ' + FILE))).toBe(false)
   })
-  test('a saved tool is not run until a consult returns it; other commands are untouched', { options: OPTS }, async ($, on) => {
+  test('a saved tool Jev did not return is not run; other commands are untouched once consulted', { options: OPTS }, async ($, on) => {
     mock.clock(on); memoryStore(on); beneathTools(on)
-    const w = world(on, jevFor({ tool: { none: 0.1, csv_to_json: 0.9 } }))
+    const w = world(on, jevFor({ tool: { none: 1 } }))
     await saved($, w)
+    // Before any consult nothing but reading runs, a plain command included.
+    expect(refused(await bash($, 'ls -la'))).toBe(true)
+    await consult($)
     expect(refused(await bash($, 'ls -la'))).toBe(false)
     expect(refused(await bash($, 'python ' + FILE + ' in.csv out.json'))).toBe(true)
     expect(logLines(w).find(l => l.type === 'consult' && l.outcome === 'denied' && l.kind === 'tool')).toMatchObject({ name: 'csv_to_json' })
+  })
+  test('a saved tool a consult returned runs', { options: OPTS }, async ($, on) => {
+    mock.clock(on); memoryStore(on); beneathTools(on)
+    const w = world(on, jevFor({ tool: { none: 0.1, csv_to_json: 0.9 } }))
+    await saved($, w)
     await consult($)
     expect(refused(await bash($, 'python ' + FILE + ' in.csv out.json'))).toBe(false)
   })
@@ -320,6 +338,289 @@ describe('every skill and saved tool during the work goes through Jev', () => {
     mock.clock(on); memoryStore(on); beneathTools(on)
     world(on, jevFor())
     expect(refused(await skill($, 'speckit-plan'))).toBe(false)
+  })
+})
+
+describe('a consult is forced, and Jev says where one work ends', () => {
+  const OPTS = { ...CONSULT, tool_save_threshold: 0 }
+  const call = ($: Engine, tool: string, input: Record<string, unknown> = {}) => $.tool.call({ tool, ...input } as never)
+  const edit = ($: Engine, path: string, extra: Record<string, unknown> = {}) => call($, 'Edit', { file_path: path, ...extra })
+  const bash = ($: Engine, command: string) => call($, 'Bash', { command })
+  const beneathAll = (on: Parameters<typeof memoryStore>[0]) => {
+    for (const tool of ['Edit', 'Write', 'Read', 'Bash', 'Agent', 'Skill']) on('tool.call', { tool } as never, () => ({ result: 'ok' }) as never)
+  }
+  const ran = (r: unknown) => (r as { result?: unknown }).result === 'ok'
+  const refused = (r: unknown) => JSON.stringify(r).includes('Jev has not returned the')
+  const noConsult = (r: unknown) => JSON.stringify(r).includes('no consult was made')
+  const otherWork = (r: unknown) => JSON.stringify(r).includes('does not look like part of the work')
+  // What Jev was asked about whether an action belongs to the work, in order.
+  const workAsks = (w: World) => w.fetches.map(f => JSON.parse(f.body)).filter(b => 'same_work' in b.questions)
+  const denied = (w: World, kind: string) => logLines(w).filter(l => l.type === 'consult' && l.outcome === 'denied' && l.kind === kind)
+  // The subagents `$.agent.list()` names: the model's own, the only ones held to a consult.
+  const listed = (on: Parameters<typeof memoryStore>[0], ...ids: string[]) =>
+    on('agent.list', () => ({ value: ids.map(id => ({ id, description: 'a task', type: 'general-purpose', status: 'running' })) as never }))
+
+  describe('nothing runs before the consult', () => {
+    test('nothing runs before the first consult, reading included; after it everything is open to the work check', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on)
+      const w = world(on, jevFor())
+      expect(noConsult(await edit($, 'C:/p/a.ts'))).toBe(true)
+      expect(noConsult(await bash($, 'ls'))).toBe(true)
+      expect(noConsult(await call($, 'Read', { file_path: 'C:/p/a.ts' }))).toBe(true)
+      expect(denied(w, 'unconsulted').map(l => l.name)).toEqual(['Edit', 'Bash', 'Read'])
+      await consult($)
+      expect(ran(await call($, 'Read', { file_path: 'C:/p/a.ts' }))).toBe(true)
+      expect(ran(await edit($, 'C:/p/a.ts'))).toBe(true)
+    })
+    test('a new message needs its own consult, even to edit', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on)
+      world(on, jevFor())
+      await begin($, 't1')
+      await consult($)
+      expect(ran(await edit($, 'C:/p/a.ts'))).toBe(true)
+      await begin($, 't2')
+      expect(noConsult(await edit($, 'C:/p/a.ts'))).toBe(true)
+      await consult($)
+      expect(ran(await edit($, 'C:/p/a.ts'))).toBe(true)
+    })
+    test('a message typed during the turn does not ask again', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on)
+      world(on, jevFor())
+      await begin($, 't1')
+      await consult($)
+      await $.prompt.submit({ text: 'and one more thing', asUser: true, turnId: 't1' } as never)
+      expect(ran(await edit($, 'C:/p/a.ts'))).toBe(true)
+    })
+    test('a subagent has its own consult to make', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on); listed(on, 'sub-1')
+      world(on, jevFor())
+      await consult($)
+      expect(noConsult(await edit($, 'C:/p/a.ts', { agentId: 'sub-1' }))).toBe(true)
+      await $.tool.call({ tool: CONSULT_TOOL, task: 'the subagent task', agentId: 'sub-1' } as never)
+      expect(ran(await edit($, 'C:/p/a.ts', { agentId: 'sub-1' }))).toBe(true)
+    })
+    test('an agent the engine does not list (a memory or compaction fork, a workflow agent) is left alone', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on); listed(on, 'sub-1')
+      world(on, jevFor())
+      expect(ran(await edit($, 'C:/p/a.ts', { agentId: 'fork-9' }))).toBe(true)
+      expect(noConsult(await edit($, 'C:/p/a.ts', { agentId: 'sub-1' }))).toBe(true)
+    })
+    test('a subagent that cannot consult is refused twice and then let through', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on); listed(on, 'sub-1')
+      const w = world(on, jevFor())
+      expect(noConsult(await edit($, 'C:/p/a.ts', { agentId: 'sub-1' }))).toBe(true)
+      expect(noConsult(await edit($, 'C:/p/a.ts', { agentId: 'sub-1' }))).toBe(true)
+      expect(ran(await edit($, 'C:/p/a.ts', { agentId: 'sub-1' }))).toBe(true)
+      expect(logLines(w).find(l => l.type === 'consult' && l.outcome === 'lifted')).toMatchObject({ kind: 'unconsulted', name: 'Edit', refusals: 2 })
+      // The main agent's count is its own.
+      expect(noConsult(await edit($, 'C:/p/a.ts'))).toBe(true)
+    })
+    test('the main agent is let through only after three refusals, and a new message counts again', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on)
+      world(on, jevFor())
+      await begin($, 't1')
+      for (let i = 0; i < 3; i++) expect(noConsult(await edit($, 'C:/p/a.ts'))).toBe(true)
+      expect(ran(await edit($, 'C:/p/a.ts'))).toBe(true)
+      await begin($, 't2')
+      expect(noConsult(await edit($, 'C:/p/a.ts'))).toBe(true)
+    })
+    test('how many refusals come before a call is let through is a setting', { options: { ...OPTS, consult_refusals: 1 } }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on)
+      world(on, jevFor())
+      await begin($, 't1')
+      expect(noConsult(await edit($, 'C:/p/a.ts'))).toBe(true)
+      expect(ran(await edit($, 'C:/p/a.ts'))).toBe(true)
+    })
+    test('an agent let through that consults afterwards is held to its work again', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on); listed(on, 'sub-1')
+      world(on, jevFor({ same: 0.1 }))
+      await edit($, 'C:/p/a.ts', { agentId: 'sub-1' })
+      await edit($, 'C:/p/a.ts', { agentId: 'sub-1' })
+      expect(ran(await edit($, 'C:/p/a.ts', { agentId: 'sub-1' }))).toBe(true)
+      await $.tool.call({ tool: CONSULT_TOOL, task: 'review the banner copy', agentId: 'sub-1' } as never)
+      expect(otherWork(await edit($, 'C:/p/a.ts', { agentId: 'sub-1' }))).toBe(true)
+    })
+    test('with Jev unreachable nothing is forced', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on)
+      world(on, jevFor({ fail: true }))
+      expect(outcome(await consult($)).status).toBe('unavailable')
+      expect(ran(await edit($, 'C:/p/a.ts'))).toBe(true)
+      expect(ran(await bash($, 'git commit -m x'))).toBe(true)
+    })
+    test('prehint, or no consult tool at all, forces nothing', { options: { ...OPTS, selection_mode: 'prehint' } }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on)
+      world(on, jevFor())
+      expect(ran(await edit($, 'C:/p/a.ts'))).toBe(true)
+    })
+    test('skill and tool selection both off: no consult tool, so nothing is forced', { options: { ...OPTS, skill_routing: false, tool_routing: false } }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on)
+      world(on, jevFor())
+      expect(ran(await edit($, 'C:/p/a.ts'))).toBe(true)
+    })
+    test('the standing instructions keep the choice with Claude, from what Jev returns, and name the work check', () => {
+      const text = consultInstructions(true)
+      expect(text).toContain('Choose from what Jev returns: use the ones that fit the work, ignore the rest.')
+      expect(text).toContain('Call it again whenever the work changes')
+      expect(text).toContain('Before an edit, a command that changes something, or a subagent, Jev checks')
+      expect(text).toContain('every tool except ToolSearch is refused, reading included')
+    })
+  })
+
+  describe('a message that continues the work', () => {
+    test('the first consult does not ask; a continuing message keeps what Jev returned and chooses nothing again', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on)
+      beneathAll(on)
+      const w = world(on, jevFor({ continues: 0.9 }))
+      await begin($, 't1')
+      const first = outcome(await consult($, 'fix the ledger rounding'))
+      expect(first.status).toBe('picked')
+      // Nothing to continue yet, so the question is not asked, and the skills were ranked and reread.
+      expect(w.fetches).toHaveLength(2)
+      expect(JSON.parse(w.fetches[0]!.body).questions).not.toHaveProperty('continues')
+      await begin($, 't2')
+      const again = outcome(await consult($, 'yes, go on'))
+      expect(again.status).toBe('continuing')
+      expect(again.reason).toContain('fix the ledger rounding')
+      // One request, the wide one with the extra question: no reread.
+      expect(w.fetches).toHaveLength(3)
+      expect(JSON.parse(w.fetches[2]!.body).questions).toHaveProperty('continues')
+      expect(w.status.at(-1)).toBe('jev: model off · continuing the work · skill and tool unchanged')
+      expect(logLines(w).filter(l => l.type === 'consult').at(-1)).toMatchObject({ outcome: 'continuing', continues: 0.9 })
+      // What was returned for the work still stands; nothing else does.
+      expect(refused(await call($, 'Skill', { skill: 'speckit-specify' }))).toBe(false)
+      expect(refused(await call($, 'Skill', { skill: 'speckit-plan' }))).toBe(true)
+    })
+    test('a message that starts other work chooses again, and what was allowed for the last work no longer is', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on)
+      const state: Jev = { continues: 0.1 }
+      world(on, jevFor(state))
+      await begin($, 't1')
+      expect(outcome(await consult($, 'fix the ledger rounding')).status).toBe('picked')
+      expect(refused(await call($, 'Skill', { skill: 'speckit-specify' }))).toBe(false)
+      await begin($, 't2')
+      state.skill = 0.05
+      expect(outcome(await consult($, 'name the new lobby banner')).status).toBe('nothing_fits')
+      expect(refused(await call($, 'Skill', { skill: 'speckit-specify' }))).toBe(true)
+    })
+    test('a later consult inside the message is a step of the work, not a new message: it chooses and adds', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on)
+      const w = world(on, jevFor({ continues: 0.9 }))
+      await begin($, 't1')
+      await consult($, 'fix the ledger rounding')
+      const step = outcome(await consult($, 'check the rounding with a review'))
+      // Never `continuing` here: a step may need a skill the first consult did not return.
+      expect(step.status).toBe('picked')
+      expect(w.fetches).toHaveLength(4)
+      expect(JSON.parse(w.fetches[2]!.body).questions).toHaveProperty('continues')
+      expect(logLines(w).filter(l => l.type === 'consult').at(-1)).toMatchObject({ outcome: 'picked', work: 'kept' })
+    })
+    test('an answer Jev leaves out is not a failure: a new message chooses again', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on)
+      const w = world(on, jevFor())
+      await begin($, 't1')
+      await consult($, 'fix the ledger rounding')
+      await begin($, 't2')
+      expect(outcome(await consult($, 'name the new lobby banner')).status).toBe('picked')
+      expect(logLines(w).filter(l => l.type === 'consult').at(-1)).toMatchObject({ outcome: 'picked', work: 'new' })
+    })
+  })
+
+  describe('Jev says whether an action belongs to the work', () => {
+    test('an edit Jev judges to be other work is sent back to consult, and goes ahead once after it', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on)
+      const w = world(on, jevFor({ same: 0.1 }))
+      await consult($, 'fix the ledger rounding')
+      const before = await edit($, 'C:/p/banner/a.ts')
+      expect(otherWork(before)).toBe(true)
+      expect(JSON.stringify(before)).toContain('fix the ledger rounding')
+      expect(JSON.stringify(before)).toContain(CONSULT_TOOL)
+      const asked = workAsks(w)
+      expect(asked).toHaveLength(1)
+      expect(asked[0].state).toMatchObject({ request: 'fix the ledger rounding' })
+      expect(asked[0].state.action).toContain('C:/p/banner/a.ts')
+      expect(Object.keys(asked[0].questions)).toEqual(['same_work'])
+      expect(denied(w, 'work')[0]).toMatchObject({ name: 'Edit', same: 0.1 })
+      // Repeating it without a consult is refused from memory: Jev is not asked again.
+      expect(otherWork(await edit($, 'C:/p/banner/a.ts'))).toBe(true)
+      expect(workAsks(w)).toHaveLength(1)
+      expect(denied(w, 'work')[1]).toMatchObject({ name: 'Edit', remembered: true })
+      await consult($, 'name the new lobby banner')
+      expect(ran(await edit($, 'C:/p/banner/a.ts'))).toBe(true)
+      // The pass was not another question to Jev.
+      expect(workAsks(w)).toHaveLength(1)
+    })
+    test('an edit Jev judges part of the work goes ahead, and the same kind of edit is not asked again', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on)
+      const w = world(on, jevFor({ same: 0.9 }))
+      await consult($, 'fix the ledger rounding')
+      expect(ran(await edit($, 'C:/p/ledger/a.ts'))).toBe(true)
+      expect(ran(await edit($, 'C:/p/ledger/b.ts'))).toBe(true)
+      expect(workAsks(w)).toHaveLength(1)
+      expect(ran(await edit($, 'C:/p/tests/c.ts'))).toBe(true)
+      expect(workAsks(w)).toHaveLength(2)
+    })
+    test('reading, the assistant\'s own notes and a command that only reads are not asked about', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on)
+      const w = world(on, jevFor({ same: 0.1 }))
+      await consult($, 'fix the ledger rounding')
+      expect(ran(await call($, 'Read', { file_path: 'C:/p/a.ts' }))).toBe(true)
+      expect(ran(await bash($, 'git status && ls -la'))).toBe(true)
+      expect(ran(await call($, 'Write', { file_path: 'C:/Users/u/.claude/projects/p-1/memory/note.md' }))).toBe(true)
+      expect(workAsks(w)).toHaveLength(0)
+    })
+    test('a command that changes something is asked about', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on)
+      const w = world(on, jevFor({ same: 0.1 }))
+      await consult($, 'fix the ledger rounding')
+      expect(otherWork(await bash($, 'git commit -m "banner"'))).toBe(true)
+      expect(workAsks(w)[0].state.action).toContain('git commit -m "banner"')
+    })
+    test('starting a subagent is asked about, with what it is for', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on)
+      const w = world(on, jevFor({ same: 0.9 }))
+      await consult($, 'fix the ledger rounding')
+      expect(ran(await call($, 'Agent', { description: 'Find rounding callers', prompt: 'List every caller of Round()' }))).toBe(true)
+      expect(workAsks(w)[0].state.action).toContain('Start a subagent')
+      expect(workAsks(w)[0].state.action).toContain('Find rounding callers')
+    })
+    test('Jev not answering lets the action go ahead: an outage must not stop the work', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on)
+      const w = world(on, jevFor({ sameFails: true }))
+      await consult($, 'fix the ledger rounding')
+      expect(ran(await edit($, 'C:/p/banner/a.ts'))).toBe(true)
+      expect(logLines(w).find(l => l.type === 'consult' && l.outcome === 'unjudged')).toMatchObject({ kind: 'work', name: 'Edit' })
+    })
+    test('a work is held per agent: a subagent is judged against its own task', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on); listed(on, 'sub-1')
+      const w = world(on, jevFor({ same: 0.9 }))
+      await consult($, 'fix the ledger rounding')
+      await $.tool.call({ tool: CONSULT_TOOL, task: 'review the banner copy', agentId: 'sub-1' } as never)
+      expect(ran(await edit($, 'C:/p/banner/copy.ts', { agentId: 'sub-1' }))).toBe(true)
+      expect(workAsks(w)[0].state.request).toBe('review the banner copy')
+    })
+    test('a continuing message keeps the work and what Jev judged part of it', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on)
+      const w = world(on, jevFor({ continues: 0.9, same: 0.9 }))
+      await begin($, 't1')
+      await consult($, 'fix the ledger rounding')
+      expect(ran(await edit($, 'C:/p/ledger/a.ts'))).toBe(true)
+      await begin($, 't2')
+      expect(outcome(await consult($, 'yes, go on')).status).toBe('continuing')
+      expect(ran(await edit($, 'C:/p/ledger/b.ts'))).toBe(true)
+      expect(workAsks(w)).toHaveLength(1)
+    })
+    test('a new work starts with nothing judged', { options: OPTS }, async ($, on) => {
+      mock.clock(on); memoryStore(on); beneathAll(on)
+      const w = world(on, jevFor({ continues: 0.1, same: 0.9 }))
+      await begin($, 't1')
+      await consult($, 'fix the ledger rounding')
+      expect(ran(await edit($, 'C:/p/ledger/a.ts'))).toBe(true)
+      await begin($, 't2')
+      await consult($, 'name the new lobby banner')
+      expect(ran(await edit($, 'C:/p/ledger/b.ts'))).toBe(true)
+      expect(workAsks(w)).toHaveLength(2)
+      expect(workAsks(w)[1].state.request).toBe('name the new lobby banner')
+    })
   })
 })
 

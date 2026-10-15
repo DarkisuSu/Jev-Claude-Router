@@ -20,7 +20,8 @@ import {
   type Effort,
 } from './model'
 import { horizonFor, learnOutput, median, normalizeStats, outputSummary, pairCost, type OutputStats } from './cost'
-import { ENDPOINT, saveQuestion } from './questions'
+import { CONTINUES_THRESHOLD, ENDPOINT, SAME_WORK_THRESHOLD, saveQuestion } from './questions'
+import { SAME_WORK_CONTEXT_CHARS, SAME_WORK_TIMEOUT_MS, WORK_TOOLS, describeAction, parseSameWork, sameWorkBody, settleRefusal, startWork, type Work } from './work'
 import {
   SAVE_DESCRIPTION,
   SAVE_INSTRUCTIONS,
@@ -45,7 +46,7 @@ import { cacheAdvice, cacheEvidence, observeUsage, resetCache, withContext, type
 import { SHARED, parseSetting, settingValue, sharedConfig } from './settings'
 import { JevError, route, type RouteResult, type Send } from './router'
 import { EMPTY_ATTEMPT, STATE_CHAR_BUDGET, STATE_RESERVE, recentContext, routingFacts, scrubText, type AttemptFacts } from './awareness'
-import { CONSULT_DESCRIPTION, CONSULT_SCHEMA, CONSULT_TOOL, consultInstructions, consultText, prepareConsult, skillTexts, type ConsultResult } from './consult'
+import { CONSULT_DESCRIPTION, CONSULT_FREE_TOOLS, CONSULT_SCHEMA, CONSULT_TOOL, NOT_FREE_TOOL, consultInstructions, consultText, prepareConsult, skillTexts, type ConsultResult } from './consult'
 import { applyHide, hiddenNames, overridesOf } from './hide'
 import { DECISION_TOOL, DECISION_DESCRIPTION, DECISION_INSTRUCTIONS, DECISION_SCHEMA, decisionText, prepareDecision, evaluateDecision } from './decisions'
 import {
@@ -90,6 +91,7 @@ type Config = {
   decisionRouting: boolean
   selectionMode: 'prehint' | 'consult'
   consultSkillText: boolean
+  consultRefusals: number
   chatNotice: boolean
   skillTrimHint: boolean
   probeWaitMs: number
@@ -235,10 +237,30 @@ const S: {
   hintedTools: SavedTool[]
   // The model line of the latest message, for the status line a consult completes.
   chosenModel: string
+  // The skill-trim reminder, kept on the status line (every status write adds it)
+  // until no project skill sends its full description. Empty: nothing to say.
+  trimHint: string
   // Consult mode: the skills and saved tools Jev has returned for the work of
   // each agent ('main', or a subagent's id); any other is refused until a
   // consult returns it. The main agent's start again with each user message.
   approvals: Map<string, { skills: Set<string>; tools: Set<string> }>
+  // Agents ('main' or a subagent's id) that have consulted since the latest user
+  // message; until then no tool but the router's own runs. Cleared with each message, while
+  // `approvals` last through a continuing message and are reset by any other consult.
+  consulted: Set<string>
+  // Agents refused for not having consulted, counted, and the ones let through
+  // after too many: an agent that cannot consult (its tool list leaves the
+  // tool out) must not be stuck, and neither must a session whose consult tool
+  // is unavailable. A consult, or a new message for the main agent, starts over.
+  refusals: Map<string, number>
+  lifted: Set<string>
+  // Agent ids `$.agent.list()` has named: the subagents and teammates the
+  // model started, the only ones held to a consult. The engine's own forks
+  // (memory, compaction) and workflow agents are not in it and are left alone.
+  listedAgents: Set<string>
+  // The work each agent consulted for (the task sentence) and what Jev has
+  // judged part of it; kept through a message that continues it.
+  works: Map<string, Work>
   // Jev could not be reached on the latest consult: nothing is refused, and
   // Claude was handed the lists to choose from itself, until a consult works.
   consultDown: boolean
@@ -288,7 +310,13 @@ const S: {
   probeQueue: [],
   hintedTools: [],
   chosenModel: '',
+  trimHint: '',
   approvals: new Map(),
+  consulted: new Set(),
+  refusals: new Map(),
+  lifted: new Set(),
+  listedAgents: new Set(),
+  works: new Map(),
   consultDown: false,
   probeAgents: new Set(),
   autoProbed: new Set(),
@@ -318,6 +346,11 @@ const approvalFor = (agentId?: string) => {
 
 function clearConversation(why: string, sessionId?: string) {
   S.approvals.clear()
+  S.consulted.clear()
+  S.refusals.clear()
+  S.lifted.clear()
+  S.listedAgents.clear()
+  S.works.clear()
   S.consultDown = false
   S.cache = resetCache(S.cache, why, sessionId)
   S.nextDecision = undefined
@@ -542,8 +575,15 @@ async function skillTrimHint($: EngineInterface) {
     if (!state?.readable) return
     const overrides = overridesOf(state.settings)
     const full = state.names.filter(n => overrides[n] === undefined)
-    if (full.length === 0) return
+    if (full.length === 0) {
+      S.trimHint = ''
+      return
+    }
     const text = `jev-router: ${full.length} project skill${full.length === 1 ? ' sends its' : 's send their'} full description to Claude on every request. /jev-skills hide all sends names only and saves those tokens (nothing is written until you run it).`
+    // A toast is gone in seconds: the short form stays on the status line.
+    // Only remembered here: the status line is written by the later updates, not
+    // while the plugin is still loading.
+    S.trimHint = `${full.length} skill${full.length === 1 ? '' : 's'} not trimmed · /jev-skills hide all`
     $.ui.toast(text)
     if (S.config.chatNotice) await chatNotice($, text)
   } catch {
@@ -1334,6 +1374,21 @@ async function dataCommand($: EngineInterface, raw: string): Promise<string> {
   return 'jev-router: /jev-data [status | clear logs [today|all] | clear learned | clear tools [project|global|all] [--keep-files] | clear all [--keep-files]]'
 }
 
+// What a consult did to the work underway: kept (the message continues it, or
+// this consult serves a step of it) or replaced by a new one. Either way an
+// action Jev sent back to consult passes once.
+function recordWork(key: string, task: string, keep: boolean): Work {
+  const old = S.works.get(key)
+  if (keep && old) {
+    settleRefusal(old)
+    return old
+  }
+  const next = startWork(task)
+  if (old) for (const refused of old.refused) next.judged.add(refused)
+  S.works.set(key, next)
+  return next
+}
+
 // consult: Claude asks Jev which skill or saved tool fits, before starting.
 // Jev reads the task and the recent conversation; nothing is loaded or run.
 async function consultCall($: EngineInterface, input: unknown, agentId?: string): Promise<ConsultResult> {
@@ -1341,13 +1396,23 @@ async function consultCall($: EngineInterface, input: unknown, agentId?: string)
   if (!config.enabled || !config.key) return { status: 'unavailable', reason: !config.key ? 'no-key' : 'disabled' }
   const prepared = prepareConsult(input)
   if (!('task' in prepared)) return prepared
+  const key = agentId ?? 'main'
+  // The first consult since the latest message is the one that says whether the
+  // message continues the work underway; a later one is a step inside it.
+  const first = !S.consulted.has(key)
+  S.consulted.add(key)
+  S.refusals.delete(key)
+  S.lifted.delete(key)
+  const sent = scrubText(prepared.task, [config.key])
   if (!S.hiddenLoaded) await loadHidden($)
   const started = await $.clock.now()
   const skills = config.skillRouting ? (await ensureIndex($)).skills : []
   const library = config.tools.routing ? await loadTools($) : undefined
   const toolOptions = library ? mergeTools(library.project, library.global) : []
-  if (skills.length === 0 && toolOptions.length === 0) return { status: 'nothing_fits', reason: 'there are no skills or saved tools to choose from' }
-  const sent = scrubText(prepared.task, [config.key])
+  if (skills.length === 0 && toolOptions.length === 0) {
+    recordWork(key, sent, !first)
+    return { status: 'nothing_fits', reason: 'there are no skills or saved tools to choose from' }
+  }
   let messages
   if (config.awareness.enabled && config.awareness.maxChars > 0) {
     try { messages = await $.session.messages() } catch { /* unknown */ }
@@ -1356,7 +1421,7 @@ async function consultCall($: EngineInterface, input: unknown, agentId?: string)
   const result = await route(
     sent,
     skills,
-    { model: config.model, gateThreshold: config.gateThreshold, fitsThreshold: config.fitsThreshold, shortlist: config.shortlist, modelFamilies: [], recentContext: recent.text, tools: toolOptions },
+    { model: config.model, gateThreshold: config.gateThreshold, fitsThreshold: config.fitsThreshold, shortlist: config.shortlist, modelFamilies: [], recentContext: recent.text, tools: toolOptions, askContinues: S.works.has(key), workUnderway: S.works.get(key)?.task, continuesStops: first },
     sender($, started + config.timeoutMs),
     () => $.clock.now(),
   )
@@ -1377,11 +1442,24 @@ async function consultCall($: EngineInterface, input: unknown, agentId?: string)
       },
     }
   }
+  S.consultDown = false
+  if (result.outcome === 'continuing') {
+    // The same work: what Jev returned before still stands, nothing is chosen again.
+    const work = recordWork(key, sent, true)
+    await log($, { type: 'consult', agent: agentId !== undefined, outcome: 'continuing', continues: result.continues, task_chars: sent.length, jev_calls: result.calls, total_ms: (await $.clock.now()) - started })
+    if (agentId === undefined) await consultNotice($, 'continuing the work · skill and tool unchanged')
+    return { status: 'continuing', reason: `This message continues the work underway ("${work.task}"); the skills and saved tools returned before still stand.` }
+  }
   const pickedTools: { tool: SavedTool; probability: number }[] = []
   for (const p of pickTools(result.tools, toolOptions, config.tools.threshold, config.tools.hints)) {
     if (await $.fs.exists(p.tool.path)) pickedTools.push(p)
   }
-  S.consultDown = false
+  // Another step of the same work adds to what is allowed; different work starts
+  // again, and what was approved for the last one no longer applies. A "same
+  // work" answer Jev left out counts as a step inside the message, not a new message.
+  const sameWork = result.continues === undefined ? !first : result.continues >= CONTINUES_THRESHOLD
+  if (!sameWork) S.approvals.delete(key)
+  recordWork(key, sent, sameWork)
   const approval = approvalFor(agentId)
   for (const s of result.selected) approval.skills.add(s.name)
   for (const p of pickedTools) approval.tools.add(p.tool.name)
@@ -1393,6 +1471,8 @@ async function consultCall($: EngineInterface, input: unknown, agentId?: string)
     agent: agentId !== undefined,
     outcome: result.selected.length + pickedTools.length > 0 ? 'picked' : 'nothing_fits',
     reason: result.reason,
+    continues: result.continues,
+    work: sameWork ? 'kept' : 'new',
     task_chars: sent.length,
     index_size: skills.length,
     tools: toolOptions.length > 0 ? { options: toolOptions.length, none: result.tools?.none ?? null, picked: pickedTools.map(p => ({ name: p.tool.name, scope: p.tool.scope, probability: p.probability })) } : undefined,
@@ -1414,6 +1494,81 @@ async function consultCall($: EngineInterface, input: unknown, agentId?: string)
   }
 }
 
+// How many calls an agent that has not consulted is refused before it is let
+// through: the main agent always can consult, so it is given more tries (the
+// `consult_refusals` setting); a subagent, at most this many.
+const SUBAGENT_REFUSALS = 2
+
+// Whether an agent is held to a consult: the main agent, and the subagents and
+// teammates the model started (`$.agent.list()` names them). Not the engine's
+// own forks (memory, compaction) or a workflow's agents, which carry ids no list
+// names and cannot consult; not this plugin's probes.
+async function heldToConsult($: EngineInterface, agentId?: string): Promise<boolean> {
+  if (agentId === undefined) return true
+  if (S.probeAgents.has(agentId)) return false
+  if (S.listedAgents.has(agentId)) return true
+  try {
+    if (!(await $.agent.list()).some(a => a.id === agentId)) return false
+    S.listedAgents.add(agentId)
+    return true
+  } catch {
+    return false
+  }
+}
+
+// Jev's answer, 0 to 1, to whether an action still belongs to the work; undefined
+// when it could not be asked in time (the action then goes ahead: Jev down must not
+// stop the work).
+async function judgeSameWork($: EngineInterface, task: string, action: string): Promise<number | undefined> {
+  const config = S.config
+  try {
+    const started = await $.clock.now()
+    let recent = ''
+    if (config.awareness.enabled && config.awareness.maxChars > 0) {
+      try {
+        const messages = await $.session.messages()
+        recent = recentContext(messages, task, { ...config.awareness, maxChars: Math.min(config.awareness.maxChars, SAME_WORK_CONTEXT_CHARS) }, [config.key]).text
+      } catch {
+        // Unknown: the task and the action are still asked.
+      }
+    }
+    const body = JSON.stringify(sameWorkBody(config.model, task, scrubText(action, [config.key]), recent))
+    const reply = await sender($, started + Math.min(config.timeoutMs, SAME_WORK_TIMEOUT_MS))(body)
+    return reply.status >= 200 && reply.status < 300 ? parseSameWork(reply.text) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// The refusal text when Jev judges an action to be other work than the one the
+// agent consulted for, else undefined. A kind of action is asked about once per
+// work; a refused one passes once, after the consult it was sent back for.
+async function workRefusal($: EngineInterface, key: string, tool: string, input: Record<string, unknown>): Promise<string | undefined> {
+  if (!WORK_TOOLS.has(tool)) return undefined
+  const work = S.works.get(key)
+  const action = work ? describeAction(tool, input) : undefined
+  if (!work || !action || work.judged.has(action.key)) return undefined
+  const sentBack = `jev-router: this ${tool} call does not look like part of the work you consulted for ("${work.task}"), by Jev's judgment. Call ${CONSULT_TOOL} with a one-sentence task for the work it serves, then repeat the call.`
+  // A kind already sent back is refused again without asking Jev, until a consult.
+  if (work.refused.has(action.key)) {
+    await log($, { type: 'consult', outcome: 'denied', kind: 'work', name: tool, remembered: true })
+    return sentBack
+  }
+  const same = await judgeSameWork($, work.task, action.text)
+  if (same === undefined) {
+    await log($, { type: 'consult', outcome: 'unjudged', kind: 'work', name: tool })
+    return undefined
+  }
+  if (same >= SAME_WORK_THRESHOLD) {
+    work.judged.add(action.key)
+    await log($, { type: 'consult', outcome: 'same-work', kind: 'work', name: tool, same })
+    return undefined
+  }
+  work.refused.add(action.key)
+  await log($, { type: 'consult', outcome: 'denied', kind: 'work', name: tool, same })
+  return sentBack
+}
+
 // Whether a text lists skills (a name every skill list here has): diagnostic only.
 const mentionsSkills = (text: unknown) => typeof text === 'string' && /speckit-|anthropic-skills:|typesafe:typesafe-ai/.test(text)
 
@@ -1421,8 +1576,17 @@ const mentionsSkills = (text: unknown) => typeof text === 'string' && /speckit-|
 // model of the message: "none" says nothing was picked, as plainly as a pick.
 async function consultNotice($: EngineInterface, found: string) {
   const line = `model ${S.chosenModel || 'off'} · ${found}`
-  $.ui.status(`jev: ${line}`)
+  setStatus($, line)
   if (S.config.chatNotice) await chatNotice($, `jev-router: consulted · ${line}`)
+}
+
+// The status line, with the skill-trim reminder after it while one is due.
+function setStatus($: EngineInterface, line: string) {
+  try {
+    $.ui.status(S.trimHint ? `jev: ${line} · ${S.trimHint}` : `jev: ${line}`)
+  } catch {
+    // A host without a status line still has the conversation notice.
+  }
 }
 
 // A line in the conversation that the person sees and the model never reads.
@@ -1719,6 +1883,37 @@ export const register: Register = (on, options) => {
     return { result: consultText(await consultCall($, { task: e.task }, (e as { agentId?: string }).agentId)) }
   }).catch(() => ({ result: consultText({ status: 'unavailable', reason: 'consult-hook-failed' }) }))
 
+  // Consult mode: until the agent has consulted for the latest message, no
+  // tool runs (reading included); after that, reading runs freely, and an action
+  // that changes something or starts more work is checked by Jev against the
+  // work consulted for. Jev being
+  // unreachable lifts both, as it lifts every refusal.
+  on('tool.call', { tool: NOT_FREE_TOOL }, async ($, e, next) => {
+    const meta = e as { agentId?: string; tool?: string }
+    const tool = String(meta.tool ?? '')
+    const key = meta.agentId ?? 'main'
+    if (
+      !(config.enabled && config.key && config.selectionMode === 'consult' && (config.skillRouting || config.tools.routing) && !S.consultDown) ||
+      CONSULT_FREE_TOOLS.has(tool) || (tool === 'Skill' && !config.skillRouting) || !(await heldToConsult($, meta.agentId))
+    ) return next(e)
+    if (!S.consulted.has(key)) {
+      if (S.lifted.has(key)) return next(e)
+      // Refused with the instruction; one that keeps on without consulting evidently
+      // cannot (its tool list leaves the tool out), so it is let through, not stuck.
+      const refused = (S.refusals.get(key) ?? 0) + 1
+      S.refusals.set(key, refused)
+      if (refused > (meta.agentId === undefined ? config.consultRefusals : Math.min(SUBAGENT_REFUSALS, config.consultRefusals))) {
+        S.lifted.add(key)
+        await log($, { type: 'consult', outcome: 'lifted', kind: 'unconsulted', name: tool, refusals: refused - 1 })
+        return next(e)
+      }
+      await log($, { type: 'consult', outcome: 'denied', kind: 'unconsulted', name: tool })
+      return { deny: `jev-router: Jev has not returned anything for this work yet: no consult was made for this message. Call ${CONSULT_TOOL} with a one-sentence task first; until then only ToolSearch runs, reading included.` }
+    }
+    const refusal = await workRefusal($, key, tool, e as unknown as Record<string, unknown>)
+    return refusal ? { deny: refusal } : next(e)
+  }).catch(($, e, next) => next(e))
+
   // A saved tool the shell ran counts as a use.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     // Consult mode: a saved tool Jev has not returned for this work is not run.
@@ -1800,7 +1995,10 @@ export const register: Register = (on, options) => {
       await finishRound($, 'superseded')
       S.nextDecision = undefined
       S.hintedTools = []
-      S.approvals.delete('main')
+      // Approvals stay: the consult for this message may say it continues the work.
+      S.consulted.delete('main')
+      S.refusals.delete('main')
+      S.lifted.delete('main')
     }
 
     const skip = (reason: string) => log($, { type: 'round', ...base, outcome: 'skipped', reason }).then(() => next(e))
@@ -1818,7 +2016,7 @@ export const register: Register = (on, options) => {
     if (!midTurn && config.routing !== 'off' && config.autoProbe && config.probeWaitMs > 0) {
       const probing = await autoProbe($, 'first use on this Claude Code')
       if (probing.length > 0) {
-        $.ui.status(`jev: probing ${probing.join(', ')} before choosing a model`)
+        setStatus($, `probing ${probing.join(', ')} before choosing a model`)
         const waitStart = await $.clock.now()
         const done = await waitForProbes($, probing, config.probeWaitMs)
         await log($, { type: 'probe', kind: 'wait', families: probing, done, waited_ms: (await $.clock.now()) - waitStart })
@@ -1889,7 +2087,7 @@ export const register: Register = (on, options) => {
       const chose = `${decision.family ?? `keep(${decision.modelReason ?? '-'})`}/${decision.effort ?? `keep(${decision.effortReason ?? '-'})`}`
       chosen = `${chose}${config.routing === 'dry-run' ? ' (dry-run)' : ''}`
       S.chosenModel = chosen
-      $.ui.status(`jev: model ${chosen}`)
+      setStatus($, `model ${chosen}`)
     }
 
     const delivery: Record<string, 'hint' | 'inject'> = {}
@@ -1927,7 +2125,7 @@ export const register: Register = (on, options) => {
       const skillText = consulting ? 'consult' : !config.skillRouting ? 'off' : result.selected.length > 0 ? result.selected.map(s => s.name).join(', ') : 'none'
       const toolText = consulting ? 'consult' : !config.tools.routing ? 'off' : pickedTools.length > 0 ? pickedTools.map(p => p.tool.name).join(', ') : 'none'
       const summary = `model ${chosen || 'off'} · skill ${skillText} · tool ${toolText}`
-      $.ui.status(`jev: ${summary}`)
+      setStatus($, summary)
       if (config.chatNotice) await chatNotice($, `jev-router: ${summary}`)
     }
 

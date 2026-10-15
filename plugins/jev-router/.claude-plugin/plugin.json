@@ -76,6 +76,14 @@
       "description": "consult returns the SKILL.md text of the skills Jev picks, so a skill can be hidden from Claude (the listing costs tokens) and still be used when Jev picks it. The text is not a native skill load: files beside the skill and its tool limits do not apply. Off: consult returns names only and Claude loads them with the Skill tool.\\nDefault: on",
       "default": true
     },
+    "consult_refusals": {
+      "type": "number",
+      "title": "Skill · Refusals before a call is let through",
+      "description": "How many calls are refused for want of a consult before the agent is let through, so a session that cannot consult is never stuck. A consult starts the count over. A subagent is let through after at most 2.\nDefault: 3",
+      "min": 1,
+      "max": 10,
+      "default": 3
+    },
     "skill_trim_hint": {
       "type": "boolean",
       "title": "Skill · Remind me to trim project skills",
