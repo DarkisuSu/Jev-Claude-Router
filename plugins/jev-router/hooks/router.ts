@@ -14,7 +14,7 @@ import {
   DEFAULT_MODEL_CRITERIA,
   type Questions,
 } from './questions'
-import { EFFORTS, FAMILIES, type Effort, type Feasible } from './model'
+import { EFFORTS, FAMILIES, monotonic, type Effort, type Feasible } from './model'
 import type { RoutingFacts } from './awareness'
 
 export type Skill = {
@@ -39,6 +39,8 @@ export type RouteConfig = {
   effortLevels?: Readonly<Record<Effort, string>>
   recentContext?: string
   routingContext?: RoutingFacts
+  // Raise a bigger tier to a smaller one's rating (default); false keeps Jev's ratings as given.
+  monotonic?: boolean
   // Saved tools to ask about (name, what it does, scope); none, and tools are not asked.
   tools?: readonly { name: string; description: string; scope: string }[]
 }
@@ -64,8 +66,11 @@ export type RouteResult = {
   rerankConfidence?: number
   fits?: Record<string, number>
   reason?: string
-  // Jev's judgment, per tier and effort, that the pair can complete the work (0 to 1).
+  // Jev's judgment, per tier and effort, that the pair can complete the work (0 to 1),
+  // with a bigger tier never below a smaller one.
   feasible?: Feasible
+  // What Jev answered, when raising a bigger tier to a smaller one's level changed it.
+  feasibleRaw?: Feasible
   // Jev's probability for each saved tool and for `none`, from one Choice.
   tools?: Record<string, number>
   calls: CallRecord[]
@@ -173,8 +178,8 @@ const choice = (r: JevResponse, id: string): ChoiceAnswer => {
 const round3 = (n: number) => Math.round(n * 1000) / 1000
 
 // Model answers are optional: a malformed one is dropped, never an error.
-type ModelAnswers = Pick<RouteResult, 'feasible' | 'tools'>
-const modelAnswers = (r: JevResponse): ModelAnswers => {
+type ModelAnswers = Pick<RouteResult, 'feasible' | 'feasibleRaw' | 'tools'>
+const modelAnswers = (r: JevResponse, monotonicTiers = true): ModelAnswers => {
   const out: ModelAnswers = {}
   const boundedNoul = (id: string) => {
     const a = r.answers[id]
@@ -189,7 +194,10 @@ const modelAnswers = (r: JevResponse): ModelAnswers => {
     }
     if (Object.keys(levels).length > 0) feasible[family] = levels
   }
-  if (Object.keys(feasible).length > 0) out.feasible = feasible
+  if (Object.keys(feasible).length > 0) {
+    out.feasible = monotonicTiers ? monotonic(feasible) : feasible
+    if (JSON.stringify(out.feasible) !== JSON.stringify(feasible)) out.feasibleRaw = feasible
+  }
   const t = r.answers.tool_which
   if (t?.type === 'choice' && t.probabilities && typeof t.probabilities === 'object' && !Array.isArray(t.probabilities)) {
     const tools: Record<string, number> = {}
@@ -216,7 +224,7 @@ export const route = async (
     // Request 1: rank every skill, gate whether any is needed, pick a saved
     // tool, and judge each tier and effort over the same state.
     const wide = await ask(send, now, 'rank_wide', rankWideBody(request, skills, config), calls)
-    models = modelAnswers(wide)
+    models = modelAnswers(wide, config.monotonic !== false)
     if (skills.length === 0) return { outcome: 'no-match', selected: [], reason: 'empty-index', calls, ...models }
 
     const parts: Record<string, number> = {}

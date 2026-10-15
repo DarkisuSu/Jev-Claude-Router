@@ -55,6 +55,25 @@ export const availableFrom = (rows: readonly RowLike[]): Available => {
 // Jev's judgment, per tier and effort, that the pair can complete the work.
 export type Feasible = Partial<Record<Family, Partial<Record<Effort, number>>>>
 
+// A more capable tier can do what a less capable one can: at each effort, a tier
+// is at least as feasible as every tier below it. Jev is asked about each tier
+// alone and may rate a bigger tier lower than a smaller one; cost is judged
+// apart from this, so the clamp only removes that inversion.
+export const monotonic = (feasible: Feasible): Feasible => {
+  const out: Feasible = {}
+  for (const effort of EFFORTS) {
+    let floor = 0
+    for (const family of FAMILIES) {
+      const value = feasible[family]?.[effort]
+      if (value === undefined) continue
+      const clamped = Math.max(value, floor)
+      floor = clamped
+      out[family] = { ...out[family], [effort]: Math.round(clamped * 1000) / 1000 }
+    }
+  }
+  return out
+}
+
 // One tier at one effort: Jev's feasibility and the router's cost for it.
 // `usd` is the estimated API-equivalent cost over the horizon (unknown when
 // no price or context is known); `rank` orders unknown costs by list price.

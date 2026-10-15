@@ -54,11 +54,11 @@ export const RERANK_INSTRUCTIONS =
 // The criteria describe the work, never "hard means opus": Jev judges fit.
 export const DEFAULT_MODEL_CRITERIA: Record<string, string> = {
   haiku:
-    'Quick, well-bounded work: a short factual answer, a lookup, a small mechanical edit, renaming, formatting, or running a known command. Little ambiguity and little cost if the first attempt is imperfect.',
+    'The smallest, fastest tier. It handles quick, well-bounded work: a short factual answer, a lookup, a small mechanical edit, renaming, formatting, or running a known command. It struggles with work that needs sustained judgment, wide context or many interacting parts.',
   sonnet:
-    'Everyday engineering: implementing or fixing a feature across a few files, writing tests, reviewing a change, explaining a codebase, or following a documented workflow. Needs care and context but not deep open-ended reasoning.',
+    'A strong general-purpose tier. It can do everything the smaller tier can, and everyday engineering: implementing or fixing a feature across several files, writing tests, reviewing a change, explaining a codebase, or following a documented workflow. It may fall short on ambiguous or high-stakes design, or subtle bugs across many interacting parts.',
   opus:
-    'Work where judgment dominates: ambiguous or high-stakes design and architecture decisions, subtle debugging across many interacting parts, security-sensitive changes, long multi-step plans, or tasks where a wrong call is costly to undo.',
+    'The most capable tier. It can do everything the smaller tiers can, and also work where judgment dominates: ambiguous or high-stakes design and architecture decisions, subtle debugging across many interacting parts, security-sensitive changes, long multi-step plans. Anything a smaller tier can complete, it can complete too.',
 }
 
 // One judgment per question; the facts each needs ride in the state:
@@ -80,7 +80,7 @@ export const DEFAULT_EFFORT_LEVELS: Readonly<Record<Effort, string>> = {
 // router takes the cheapest pair Jev judges able to complete the work.
 export const feasibleQuestion = (family: string, description: string, effort: string, effortDescription: string): Question => ({
   type: 'noul',
-  instructions: `Can the ${family} tier at ${effort} effort reliably complete the latest \`request\` (use \`recent_context\` for a follow-up; \`routing_context.previous_attempt\` notes failures this turn; \`routing_context.context\` gives the conversation size and what each tier is known to hold)? Judge ability alone, not cost. The tier: ${description} At ${effort} effort: ${effortDescription}`,
+  instructions: `Can the ${family} tier at ${effort} effort reliably complete the latest \`request\` (use \`recent_context\` for a follow-up; \`routing_context.previous_attempt\` notes failures this turn; \`routing_context.context\` gives the conversation size and what each tier is known to hold)? Judge ability alone, not cost: whether this tier at this effort can complete the work correctly. A more capable tier can do everything a less capable one can, so never rate a tier lower for being more than the work needs. The tier: ${description} At ${effort} effort: ${effortDescription}`,
   criteria: {
     true: 'It would complete the work correctly without needing a stronger tier or more effort.',
     false: 'It is likely to fail, need retries, or make a costly mistake on this work.',

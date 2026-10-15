@@ -259,7 +259,7 @@ describe('awareness engine integration', () => {
     expect(JSON.parse(w.fetches[0]!.body).state.recent_context).toBe('')
   })
   test('the cheapest feasible pair runs: on a subscription, staying on a big warm Opus beats rebuilding it on Haiku', { options }, async ($, on) => {
-    mock.clock(on); mock.store(on, { caps: caps55 })
+    mock.clock(on); mock.store(on, { caps: caps55, advanced: { tier_monotonic: false } })
     const w = world(on, answer({ 'haiku::low': 0.7, 'sonnet::high': 0.9, 'opus::high': 0.9 })), sent = bottom(on, w)
     w.contextTokens = 865000
     await begin($, 'a'); await step($, 'a'); await step($, 'a', 1)
@@ -347,7 +347,7 @@ describe('awareness engine integration', () => {
     expect(body.state.routing_context.previous_attempt).toBe(null)
   })
   test('dry-run records the cost-sorted pick without changing requests', { options: { ...options, model_routing: 'dry-run' } }, async ($, on) => {
-    mock.clock(on); mock.store(on, { caps })
+    mock.clock(on); mock.store(on, { caps, advanced: { tier_monotonic: false } })
     const w = world(on, answer({ 'haiku::high': 0.3, 'sonnet::low': 0.5, 'opus::high': 0.9 })), sent = bottom(on, w)
     await begin($, 'a'); await step($, 'a')
     expect(sent).toEqual([{ model: SONNET, effort: 'medium' }])
@@ -379,7 +379,9 @@ describe('Jev response schema', () => {
       return { status: res.status, text: JSON.stringify(res.body) }
     }, async () => 0)
     expect(bodies.length).toBe(2)
-    expect(result.feasible?.sonnet).toEqual({ low: 0.1, medium: 0.9, high: 0.1, xhigh: 0.1, max: 0.1 })
+    // Sonnet is never below Haiku (0.2 at low); Jev's own ratings are kept beside.
+    expect(result.feasible?.sonnet).toEqual({ low: 0.2, medium: 0.9, high: 0.1, xhigh: 0.1, max: 0.1 })
+    expect(result.feasibleRaw?.sonnet).toEqual({ low: 0.1, medium: 0.9, high: 0.1, xhigh: 0.1, max: 0.1 })
     expect(bodies[1].state.recent_context).toBe(bodies[0].state.recent_context)
     expect(Object.keys(bodies[1].questions).some(k => k.startsWith('feasible::'))).toBe(false)
   })

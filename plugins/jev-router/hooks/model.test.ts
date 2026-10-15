@@ -5,7 +5,8 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { FAKE_KEY, PROMPT, logLines, rankWide, rerank, world, type World } from './testkit'
-import { availableFrom, decide, learn, planStep } from './model'
+import { rankWideBody } from './router'
+import { availableFrom, decide, learn, monotonic, planStep } from './model'
 
 // Full ids as the engine resolves them; the router never sends a bare alias.
 const SONNET = 'claude-sonnet-test-id'
@@ -726,5 +727,47 @@ describe('turn note', () => {
 
     expect(done.text).toContain('dry-run, nothing was switched')
     expect(done.text).toContain('cheapest feasible haiku/low')
+  })
+})
+
+describe('a bigger tier is never rated below a smaller one', () => {
+  test('monotonic raises each tier to the best of those below it, effort by effort, and changes nothing else', () => {
+    const raw = { haiku: { low: 0.3, high: 0.9 }, sonnet: { low: 0.1, high: 0.5, max: 0.4 }, opus: { low: 0.2, high: 0.95, max: 0.1 } }
+    expect(monotonic(raw)).toEqual({ haiku: { low: 0.3, high: 0.9 }, sonnet: { low: 0.3, high: 0.9, max: 0.4 }, opus: { low: 0.3, high: 0.95, max: 0.4 } })
+    // A tier not asked about is skipped, not invented.
+    expect(monotonic({ sonnet: { low: 0.7 }, opus: { medium: 0.2 } })).toEqual({ sonnet: { low: 0.7 }, opus: { medium: 0.2 } })
+    expect(monotonic({})).toEqual({})
+    expect(raw.sonnet.low).toBe(0.1)
+  })
+
+  test('what Sonnet can do Opus can too: the likelier of the cheaper pairs is not undercut by an inverted Opus', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', model_routing: 'on', write_log: true } }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, LEARNED)
+    const w = world(on, answers({ 'sonnet::medium': 0.9 }))
+    bottom(on)
+    await turn($, w)
+    const round = logLines(w).find(l => l.type === 'round')!
+    // Jev rated Opus at 0.1 everywhere; the router lifts it to Sonnet's 0.9 at medium.
+    expect(round.jev_feasible.opus.medium).toBe(0.9)
+    expect(round.jev_feasible_raw.opus.medium).toBe(0.1)
+  })
+
+  test('tier_monotonic off uses Jev\'s ratings as given and records no raw copy', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', model_routing: 'on', write_log: true } }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, { ...LEARNED, advanced: { tier_monotonic: false } })
+    const w = world(on, answers({ 'sonnet::medium': 0.9 }))
+    bottom(on)
+    await turn($, w)
+    const round = logLines(w).find(l => l.type === 'round')!
+    expect(round.jev_feasible.opus.medium).toBe(0.1)
+    expect(round.jev_feasible_raw).toBeUndefined()
+  })
+
+  test('the questions say the tier is judged on ability, and the default descriptions say what each can do', () => {
+    const asked = rankWideBody('Fix the bug.', [], { model: 'jev-latest', gateThreshold: 0.3, fitsThreshold: 0.3, shortlist: 3, modelFamilies: ['sonnet', 'opus'] }).questions as Record<string, { instructions: string }>
+    const q = asked['feasible::opus::high']!.instructions
+    expect(q).toContain('A more capable tier can do everything a less capable one can')
+    expect(q).toContain('Anything a smaller tier can complete, it can complete too.')
+    expect(asked['feasible::sonnet::high']!.instructions).toContain('It can do everything the smaller tier can')
   })
 })

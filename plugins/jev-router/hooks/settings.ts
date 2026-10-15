@@ -46,6 +46,7 @@ export const SHARED: Record<string, Spec> = {
   tool_max: { where: 'store', kind: 'number', default: 50, min: 1, max: 200, integer: true, what: 'Most saved tools per scope (project, global); past it the least recently used is dropped' },
   tool_hints: { where: 'store', kind: 'number', default: 3, min: 1, max: 5, integer: true, what: 'Most saved tools suggested for one request' },
   probe_wait_ms: { where: 'store', kind: 'number', default: 20000, min: 0, max: 120000, integer: true, what: 'Longest the first message waits for a model probe to finish before it goes on; 0 does not wait' },
+  tier_monotonic: { where: 'store', kind: 'boolean', default: true, what: 'A bigger tier is never rated below a smaller one at the same effort: what Sonnet can do Opus can too, and what Haiku can do Sonnet can (Jev rates each tier alone; cost is judged apart). Off: Jev\'s ratings are used as given' },
   auto_probe: { where: 'store', kind: 'boolean', default: true, what: 'Probe models automatically: on first use (no learned ids on this Claude Code) and after a routed request fails' },
   decision_confidence_threshold: { where: 'store', kind: 'number', default: 0.6, min: 0.5, max: 1, what: 'Decision answers below this are uncertain: Choice/Score confidence, or Noul probability of the likelier yes/no outcome' },
   jev_context_chars: { where: 'store', kind: 'number', default: 12000, min: 0, max: 20000, integer: true, what: 'Most characters of recent conversation sent to Jev (also held to what the request leaves of a 24000-character state budget); 0 sends none' },
@@ -96,6 +97,7 @@ export const sharedConfig = (page: Record<string, unknown>, store: Record<string
     decisionConfidence: v('decision_confidence_threshold') as number,
     feasibleThreshold: v('feasibility_threshold') as number,
     autoProbe: v('auto_probe') as boolean,
+    tierMonotonic: v('tier_monotonic') as boolean,
     modelDescriptions: Object.fromEntries(['haiku', 'sonnet', 'opus'].map(f => [f, String(v(`model_${f}`))])),
     effortLevels: Object.fromEntries(EFFORTS.map(e => [e, String(v(`effort_${e}`))])) as Record<Effort, string>,
     cache: {

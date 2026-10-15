@@ -106,6 +106,7 @@ type Config = {
   fallback: Fallback
   feasibleThreshold: number
   autoProbe: boolean
+  tierMonotonic: boolean
   effortLevels: Record<Effort, string>
   modelDescriptions: Record<string, string>
   cache: ReturnType<typeof sharedConfig>['cache']
@@ -1862,6 +1863,7 @@ export const register: Register = (on, options) => {
         modelDescriptions: config.modelDescriptions,
         recentContext: recent.text,
         routingContext: facts,
+        monotonic: config.tierMonotonic,
         tools: toolOptions,
       },
       sender($, deadline),
@@ -1949,6 +1951,7 @@ export const register: Register = (on, options) => {
       delivery,
       model_routing: config.routing,
       jev_feasible: result.feasible,
+      jev_feasible_raw: result.feasibleRaw,
       cost_basis: config.routing !== 'off' ? { context_tokens: evidence.contextTokens ?? null, cache: evidence.status, ttl: evidence.ttlSource, horizon: horizonNow().horizon, horizon_source: horizonNow().source, tolerance: config.cost.tolerance, outputs: outputSummary(S.outputs) } : undefined,
       candidates: decision.candidates?.map(c => ({ pair: `${c.family}/${c.effort}`, ...c, family: undefined, effort: undefined })),
       awareness: { source: recent.source, messages: recent.messages, chars: recent.text.length, truncated: recent.truncated },

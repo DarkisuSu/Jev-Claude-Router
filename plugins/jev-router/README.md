@@ -119,7 +119,9 @@ The state carries:
 - `recent_context`: short excerpts of recent user and assistant messages, for follow-ups such as "continue" (see [Recent context](#recent-context)).
 - `routing_context`: the current model, the conversation size and what each tier is known to hold (see [Context size](#context-size)), and the last attempt's failure counts. It holds no costs: cost is not Jev's to judge.
 
-Tier and effort descriptions are part of each question. They have defaults and can be changed with `/jev-model set`. The effort descriptions describe a reasoning budget (low: little deliberate reasoning; high: compares approaches and checks its work; max: the most thorough the model offers), not a kind of task.
+Tier and effort descriptions are part of each question. They have defaults and can be changed with `/jev-model set`. The tier descriptions say what each tier **can do** (Sonnet can do what Haiku can and more; Opus can do what the smaller tiers can and also the hardest work), not which work it is reserved for: an earlier wording described each tier's niche, and Jev then rated Opus below Sonnet in nearly every round (Opus was rated able in 13 of 103 rounds, Sonnet in 95), as if Opus were only for the hardest work. The question also tells Jev never to rate a tier lower for being more than the work needs.
+
+**Bigger never below smaller.** Jev still rates each tier alone, so the router also enforces the one thing that always holds: at each effort a tier is at least as likely to complete the work as every tier below it (`tier_monotonic`, on by default; `/jev-model set tier_monotonic false` uses Jev's ratings as given). Cost is still judged apart, so when Sonnet is enough, Sonnet usually still wins on price; but staying on a warm Opus can now beat rebuilding the cache on Sonnet, and Opus no longer ranks as feasible only when nothing else is. The log keeps Jev's own ratings as `jev_feasible_raw` whenever the clamp changed any. The effort descriptions describe a reasoning budget (low: little deliberate reasoning; high: compares approaches and checks its work; max: the most thorough the model offers), not a kind of task.
 
 ### How the pick is made
 
@@ -255,6 +257,7 @@ The rest are kept off the page, saved in `$.store`, and changed with `/jev-model
 | Name | Default | Range |
 |---|---|---|
 | `model_haiku` / `model_sonnet` / `model_opus` | see `/jev-model settings` | up to 500 characters |
+| `tier_monotonic` | true | true / false |
 | `effort_low` / `effort_medium` / `effort_high` / `effort_xhigh` / `effort_max` | see `/jev-model settings` | up to 500 characters |
 | `cache_min_tokens` | 20000 | 0 to 10000000 |
 | `cache_min_hit_ratio` | 0.8 | 0 to 1 |

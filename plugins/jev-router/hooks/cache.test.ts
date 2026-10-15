@@ -120,7 +120,8 @@ describe('cache evidence and estimator', () => {
   })
 })
 
-const learned = { caps: { version: '9.9.9', families: { opus: { id: OPUS, ok: true, effort: true, at: '' }, sonnet: { id: SONNET, ok: true, effort: true, at: '' }, haiku: { id: HAIKU, ok: true, effort: true, at: '' } }, retryOk: true } }
+// These tests give Jev's rating of one tier alone, so the tier clamp is off.
+const learned = { caps: { version: '9.9.9', families: { opus: { id: OPUS, ok: true, effort: true, at: '' }, sonnet: { id: SONNET, ok: true, effort: true, at: '' }, haiku: { id: HAIKU, ok: true, effort: true, at: '' } }, retryOk: true }, advanced: { tier_monotonic: false } }
 const options = { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', model_routing: 'on', write_log: true }
 // Jev judges only the chosen tier at the chosen effort (0 low, 1 medium,
 // 2 high) able to do the work; `fail` makes Jev answer with an error.
@@ -231,7 +232,7 @@ describe('cache routing engine integration', () => {
     expect(last(w)?.cache_advice.evidence.status).toBe('expired')
   })
   test('dry-run records Jev and advisory costs while sending the session model', { options: { ...options, model_routing: 'dry-run' } }, async ($, on) => {
-    mock.clock(on); mock.store(on, { ...learned, advanced: { cost_horizon: 1 } })
+    mock.clock(on); mock.store(on, { ...learned, advanced: { tier_monotonic: false, cost_horizon: 1 } })
     const choice: Choice = { model: 'sonnet', score: 1 }
     const w = world(on, jev(choice)), sent = bottom(on, w)
     await begin($, 'a'); await step($, 'a')
@@ -366,7 +367,7 @@ describe('settings homes', () => {
     expect(sharedConfig({}, { cache_min_tokens: -1, cache_min_hit_ratio: NaN }).cache).toEqual(cfg)
   })
   test('commands write each setting to its own home; a restart reads them back', { options }, async ($, on) => {
-    mock.clock(on); const saved = memoryStore(on, learned)
+    mock.clock(on); const saved = memoryStore(on, { caps: learned.caps })
     const w = world(on, jev({ model: 'sonnet', score: 1 })); bottom(on, w)
     await $.command.run({ command: 'jev-model', args: 'set model_haiku My Small Work' })
     await $.command.run({ command: 'jev-model', args: 'set effort_high Weigh several approaches' })
