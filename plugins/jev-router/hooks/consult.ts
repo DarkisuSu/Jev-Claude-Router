@@ -22,8 +22,8 @@ export const CONSULT_SCHEMA = {
 export const consultInstructions = (routesModel: boolean): string =>
   [
     `Jev router: ${routesModel ? 'the model and effort of each turn, and ' : ''}the choice of a skill or a saved tool ${routesModel ? 'are' : 'is'} delegated to Jev (TypeSafe), not decided by you.`,
-    `At the start of every user message, before anything else, call ${CONSULT_TOOL} once with a one-sentence task. Jev answers with the skills and saved tools that fit, with probabilities, or says none does. Then follow it: load a picked skill with the Skill tool, or read a picked tool's file before running it. Normal permission checks apply.`,
-    'Do not pick a skill or a saved tool on your own before Jev has answered. If Jev is unavailable or picks nothing, carry on with your own judgment; do not call it again for the same message.',
+    `At the start of every user message, before anything else, call ${CONSULT_TOOL} once with a one-sentence task. Jev answers with the skills and saved tools that fit, with probabilities, or says none does. Choose from what Jev returns: use the ones that fit the work, ignore the rest, and load a picked skill with the Skill tool or read a picked tool's file before running it. Normal permission checks apply.`,
+    'Use only a skill or a saved tool that Jev returned; do not pick one on your own. If Jev is unavailable or picks nothing, carry on with your own judgment; do not call it again for the same message.',
   ].join('\n')
 
 export type ConsultResult = {

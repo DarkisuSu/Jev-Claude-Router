@@ -96,7 +96,7 @@ describe('generic typed decisions', () => {
 })
 
 describe('decision plugin integration', () => {
-  test('registers an upfront tool and appends the policy only when that tool is offered', { options: { typesafe_api_key: FAKE_KEY } }, async ($, on) => {
+  test('registers an upfront tool and appends the policy only when that tool is offered', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint' } }, async ($, on) => {
     mock.clock(on); memoryStore(on)
     world(on, () => ({ status: 200, body: answer() }))
     let tool: any
@@ -111,7 +111,7 @@ describe('decision plugin integration', () => {
     expect(composed.sections[1]?.text).toBe(DECISION_INSTRUCTIONS)
     expect((await $.prompt.compose(promptArgs([]))).sections.map(s => s.id)).toEqual(['existing'])
   })
-  test('a tool call sends evidence and returns a decision even with model and skill routing off', { options: { typesafe_api_key: FAKE_KEY, model_routing: 'off', skill_routing: false, write_log: true } }, async ($, on) => {
+  test('a tool call sends evidence and returns a decision even with model and skill routing off', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint', model_routing: 'off', skill_routing: false, write_log: true } }, async ($, on) => {
     mock.clock(on); memoryStore(on)
     const w = world(on, () => ({ status: 200, body: answer() }))
     const result = await $.tool.call({ tool: DECISION_TOOL, ...input() } as never)
@@ -128,7 +128,7 @@ describe('decision plugin integration', () => {
     expect(parsed(owned).status).toBe('requires_user')
     expect(w.fetches.length).toBe(1)
   })
-  for (const options of [{ decision_routing: false, typesafe_api_key: FAKE_KEY }, { enabled: false, typesafe_api_key: FAKE_KEY }, {}]) {
+  for (const options of [{ decision_routing: false, typesafe_api_key: FAKE_KEY, selection_mode: 'prehint' }, { enabled: false, typesafe_api_key: FAKE_KEY, selection_mode: 'prehint' }, {}]) {
     test(`disabled or no key: no request and no system policy (${JSON.stringify(options)})`, { options }, async ($, on) => {
       mock.clock(on); memoryStore(on)
       const w = world(on, () => ({ status: 200, body: answer() }))
@@ -139,7 +139,7 @@ describe('decision plugin integration', () => {
       expect(w.fetches.length).toBe(0)
     })
   }
-  test('the shared timeout bounds a hung decision without fabricating an answer', { options: { typesafe_api_key: FAKE_KEY } }, async ($, on) => {
+  test('the shared timeout bounds a hung decision without fabricating an answer', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint' } }, async ($, on) => {
     const clock = mock.clock(on)
     memoryStore(on, { advanced: { timeout_ms: 2000 } })
     world(on, () => 'hang')
@@ -150,7 +150,7 @@ describe('decision plugin integration', () => {
     expect(parsed(result).status).toBe('unavailable')
     expect(parsed(result).reason).toBe('jev timeout')
   })
-  test('confidence settings apply immediately and logging stays off by default', { options: { typesafe_api_key: FAKE_KEY } }, async ($, on) => {
+  test('confidence settings apply immediately and logging stays off by default', { options: { typesafe_api_key: FAKE_KEY, selection_mode: 'prehint' } }, async ($, on) => {
     mock.clock(on); memoryStore(on)
     const w = world(on, () => ({ status: 200, body: answer() }))
     await $.command.run({ command: 'jev-model', args: 'set decision_confidence_threshold 0.95' })

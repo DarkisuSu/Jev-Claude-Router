@@ -79,12 +79,12 @@
     "selection_mode": {
       "type": "string",
       "title": "Skill & Tool · Selection mode",
-      "description": "prehint: Jev picks a skill or saved tool while your prompt is sent, and the picks ride beside it. consult: Claude is told only that the choice is Jev's and asks Jev with the consult tool before starting, so the exchange shows in the conversation. Model and effort are always chosen as the prompt is sent.\nDefault: prehint",
+      "description": "consult: Claude is shown neither the skill list nor the saved tools; it asks Jev with the consult tool at the start of every message and chooses among what Jev returns, so the exchange shows in the conversation. prehint: Jev picks a skill or saved tool while your prompt is sent, and the picks ride beside it. Model and effort are always chosen as the prompt is sent.\nDefault: consult",
       "options": [
-        "prehint",
-        "consult"
+        "consult",
+        "prehint"
       ],
-      "default": "prehint"
+      "default": "consult"
     },
     "tool_routing": {
       "type": "boolean",

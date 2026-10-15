@@ -12,7 +12,7 @@ describe('consult instructions and input', () => {
     const text = consultInstructions(true)
     expect(text).toContain('the model and effort of each turn, and the choice of a skill or a saved tool are delegated to Jev')
     expect(text).toContain(`At the start of every user message, before anything else, call ${CONSULT_TOOL}`)
-    expect(text).toContain('Do not pick a skill or a saved tool on your own')
+    expect(text).toContain('Use only a skill or a saved tool that Jev returned')
     expect(text).not.toContain('Saved tools Jev can pick from')
     expect(consultInstructions(false)).toContain('the choice of a skill or a saved tool is delegated')
   })
@@ -72,7 +72,7 @@ describe('consult mode', () => {
     const without = await $.prompt.compose({ model: 'm', promptModel: 'm', tools: [], surfaces: [], outputStyle: null, traits: [] } as never)
     expect(without.sections.find(s => s.id === 'jev-router:consult')).toBeUndefined()
   })
-  test('the default, prehint, has no consult tool and no consult instructions', { options: { typesafe_api_key: FAKE_KEY, model_routing: 'off' } }, async ($, on) => {
+  test('prehint has no consult tool and no consult instructions', { options: { typesafe_api_key: FAKE_KEY, model_routing: 'off', selection_mode: 'prehint' } }, async ($, on) => {
     mock.clock(on); memoryStore(on); world(on, jevFor())
     const registered = beneath(on)
     await start($)
@@ -131,7 +131,7 @@ describe('consult mode', () => {
 })
 
 describe('prehint mode says what Jev chose', () => {
-  test('the status line names a picked tool', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'off', skill_routing: false, tool_save_threshold: 0 } }, async ($, on) => {
+  test('the status line names a picked tool', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'off', skill_routing: false, tool_save_threshold: 0, selection_mode: 'prehint' } }, async ($, on) => {
     mock.clock(on); memoryStore(on)
     const w = world(on, jevFor({ tool: { none: 0.1, csv_to_json: 0.9 } }))
     await saved($, w)
@@ -141,7 +141,7 @@ describe('prehint mode says what Jev chose', () => {
 })
 
 describe('a line in the conversation', () => {
-  const TOOLS = { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'off', skill_routing: false, tool_save_threshold: 0 }
+  const TOOLS = { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'off', skill_routing: false, tool_save_threshold: 0, selection_mode: 'prehint' }
   test('says what Jev chose, as a notice the model does not read', { options: TOOLS }, async ($, on) => {
     mock.clock(on); memoryStore(on)
     const session = mock.session(on)
@@ -159,7 +159,7 @@ describe('a line in the conversation', () => {
     await begin($)
     expect(session.appended()).toHaveLength(0)
   })
-  test('nothing chosen reads as none, never as silence; consult mode says so', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'off' } }, async ($, on) => {
+  test('nothing chosen reads as none, never as silence', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'off', selection_mode: 'prehint' } }, async ($, on) => {
     mock.clock(on); memoryStore(on)
     const session = mock.session(on)
     const w = world(on, jevFor({ skill: 0.05 }))
@@ -182,7 +182,7 @@ describe('the skill list the engine adds', () => {
     on('prompt.attachment', (_, e) => ({ text: e.text }))
     expect((await listing($)).text).toBeNull()
   })
-  test('prehint, and consult with skill selection off, keep it', { options: { typesafe_api_key: FAKE_KEY, model_routing: 'off' } }, async ($, on) => {
+  test('prehint keeps it', { options: { typesafe_api_key: FAKE_KEY, model_routing: 'off', selection_mode: 'prehint' } }, async ($, on) => {
     mock.clock(on); memoryStore(on); world(on, jevFor())
     on('prompt.attachment', (_, e) => ({ text: e.text }))
     expect((await listing($)).text).toBe('- speckit-plan: plans')
