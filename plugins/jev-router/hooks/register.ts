@@ -1519,8 +1519,7 @@ export const register: Register = (on, options) => {
     if (config.decisionRouting && e.tools.includes(DECISION_TOOL)) add('jev-router:decisions', DECISION_INSTRUCTIONS)
     if (config.tools.save && e.tools.includes(SAVE_TOOL)) add('jev-router:tools', SAVE_INSTRUCTIONS)
     if (config.selectionMode === 'consult' && e.tools.includes(CONSULT_TOOL)) {
-      const library = config.tools.routing ? await loadTools($) : undefined
-      add('jev-router:consult', consultInstructions(library ? mergeTools(library.project, library.global) : [], config.routing !== 'off'))
+      add('jev-router:consult', consultInstructions(config.routing !== 'off'))
     }
     return sections === result.sections ? result : { ...result, sections }
   }).catch(($, e, next) => next(e))

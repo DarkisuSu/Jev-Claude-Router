@@ -1,27 +1,20 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import { CONSULT_TOOL, consultInstructions, prepareConsult } from './consult'
-import { SAVE_TOOL, type SavedTool } from './tools'
+import { SAVE_TOOL } from './tools'
 import { FAKE_KEY, logLines, memoryStore, PROMPT, rankWide, rerank, world, type World } from './testkit'
 
 const FILE = 'C:/work/tools/csv_to_json.py'
 const GOOD = { name: 'csv_to_json', description: 'Converts CSV exports to JSON', usage: 'python tools/csv_to_json.py in.csv out.json', path: FILE }
-const tool = (over: Partial<SavedTool> = {}): SavedTool => ({ ...GOOD, scope: 'project', origin: 'assistant', created: 1, used: 0, ...over })
 
 describe('consult instructions and input', () => {
-  test('say the choice is Jev\'s, when to skip, and list the saved tools by name and one line', () => {
-    const text = consultInstructions([tool(), tool({ name: 'mine', origin: 'user', description: 'My <b>own</b> helper', scope: 'global' })], true)
+  test('say the choice is delegated to Jev, that every message goes to Jev first, and list nothing', () => {
+    const text = consultInstructions(true)
     expect(text).toContain('the model and effort of each turn, and the choice of a skill or a saved tool are delegated to Jev')
-    expect(text).toContain(CONSULT_TOOL)
-    expect(text).toContain('Skip the call for plain conversation')
-    expect(text).toContain("- csv_to_json (project): Converts CSV exports to JSON")
-    expect(text).toContain("- mine (global, registered by the user): My 'b'own'/b' helper")
-    expect(consultInstructions([], false)).not.toContain('Saved tools Jev can pick from')
-    expect(consultInstructions([], false)).toContain('the choice of a skill or a saved tool is delegated')
-  })
-  test('a long list is cut, saying how many more there are', () => {
-    const many = Array.from({ length: 35 }, (_, i) => tool({ name: `t${i}` }))
-    expect(consultInstructions(many, true)).toContain('… and 5 more')
+    expect(text).toContain(`At the start of every user message, before anything else, call ${CONSULT_TOOL}`)
+    expect(text).toContain('Do not pick a skill or a saved tool on your own')
+    expect(text).not.toContain('Saved tools Jev can pick from')
+    expect(consultInstructions(false)).toContain('the choice of a skill or a saved tool is delegated')
   })
   test('a task is required, flattened to one line', () => {
     expect(prepareConsult({ task: '  fix\n the   ledger ' })).toEqual({ task: 'fix the ledger' })
@@ -66,7 +59,7 @@ const start = ($: Engine) => $.session.start({ cwd: 'C:/fakeproject' } as never)
 const compose = ($: Engine) => $.prompt.compose({ model: 'm', promptModel: 'm', tools: [CONSULT_TOOL], surfaces: [], outputStyle: null, traits: [] } as never)
 
 describe('consult mode', () => {
-  test('the tool is registered and its instructions list the saved tools', { options: { ...CONSULT, tool_save_threshold: 0 } }, async ($, on) => {
+  test('the tool is registered and its instructions list nothing', { options: { ...CONSULT, tool_save_threshold: 0 } }, async ($, on) => {
     mock.clock(on); memoryStore(on)
     const w = world(on, jevFor())
     const registered = beneath(on)
@@ -75,7 +68,7 @@ describe('consult mode', () => {
     expect(registered).toContain('consult')
     const section = (await compose($)).sections.find(s => s.id === 'jev-router:consult')
     expect(section?.text).toContain('delegated to Jev')
-    expect(section?.text).toContain('- csv_to_json (project): Converts CSV exports to JSON')
+    expect(section?.text).not.toContain('csv_to_json')
     const without = await $.prompt.compose({ model: 'm', promptModel: 'm', tools: [], surfaces: [], outputStyle: null, traits: [] } as never)
     expect(without.sections.find(s => s.id === 'jev-router:consult')).toBeUndefined()
   })
