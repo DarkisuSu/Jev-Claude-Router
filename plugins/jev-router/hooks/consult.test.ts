@@ -174,3 +174,22 @@ describe('a line in the conversation', () => {
     expect(w.status.at(-1)).toBe('jev: model off · skill consult · tool consult')
   })
 })
+
+describe('the skill list the engine adds', () => {
+  const listing = ($: Engine) => $.prompt.attachment({ type: 'skill_listing', text: '- speckit-plan: plans' } as never)
+  test('consult mode leaves it out of the request, so Claude is not shown the skills', { options: CONSULT }, async ($, on) => {
+    mock.clock(on); memoryStore(on); world(on, jevFor())
+    on('prompt.attachment', (_, e) => ({ text: e.text }))
+    expect((await listing($)).text).toBeNull()
+  })
+  test('prehint, and consult with skill selection off, keep it', { options: { typesafe_api_key: FAKE_KEY, model_routing: 'off' } }, async ($, on) => {
+    mock.clock(on); memoryStore(on); world(on, jevFor())
+    on('prompt.attachment', (_, e) => ({ text: e.text }))
+    expect((await listing($)).text).toBe('- speckit-plan: plans')
+  })
+  test('consult with skill selection off keeps it too', { options: { ...CONSULT, skill_routing: false } }, async ($, on) => {
+    mock.clock(on); memoryStore(on); world(on, jevFor())
+    on('prompt.attachment', (_, e) => ({ text: e.text }))
+    expect((await listing($)).text).toBe('- speckit-plan: plans')
+  })
+})

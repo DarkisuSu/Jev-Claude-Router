@@ -1524,6 +1524,13 @@ export const register: Register = (on, options) => {
     return sections === result.sections ? result : { ...result, sections }
   }).catch(($, e, next) => next(e))
 
+  // Consult mode: Claude is not shown the skill list; Jev names what fits.
+  // Only while skill selection is on, or Claude would have no way to find a skill.
+  on('prompt.attachment', { type: 'skill_listing' }, async ($, e, next) => {
+    if (config.enabled && config.key && config.selectionMode === 'consult' && config.skillRouting) return { text: null }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('tool.call', { tool: 'mcp__jev-router__save_tool' }, async ($, e) => {
     const result = await saveToolCall($, { name: e.name, description: e.description, usage: e.usage, path: e.path, scope: e.scope })
     return { result: saveText(result) }
