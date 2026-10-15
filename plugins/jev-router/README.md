@@ -29,6 +29,13 @@ Release installation: `/plugin install jev-router --marketplace DarkisuSu/Jev-Cl
 
 **Load tracking:** a `tool.call` hook on the Skill tool records real native loads, with `skill.prompt` as a second source. Each turn's log entry marks every routed skill `native-loaded`, `injected` or `not-loaded`.
 
+## Selection mode: prehint or consult
+
+`selection_mode` (settings page) decides how a skill or a saved tool reaches Claude. The model and effort are always chosen while the prompt is sent, because they must be set before the turn starts.
+
+- **`prehint`** (default): Jev picks while the prompt is sent, and the picks ride beside it as `<skill_relevance>` and `<tool_relevance>` (described below). The status line names what was chosen, for example `jev: model sonnet/high · skill speckit-plan · tool csv_to_json` (always all three: a skill or tool not chosen reads `none`, a switched-off one `off`, consult mode `consult`; the same line is added to the conversation as a notice the model does not read, unless `chat_notice` is off).
+- **`consult`**: the prompt carries no skill or tool pick, and Jev is not asked about them while it is sent. Claude is told, in a system section, that the model and effort, and the choice of a skill or saved tool, are delegated to Jev. It gets the saved tools listed by name and one line (its skills it already knows), and a `consult` tool: before starting work a skill or a tool might serve, it calls `consult` with a one-sentence task. The router asks Jev (the skill ranking and gates, then the saved-tool Choice, over that task and the recent conversation) and answers with the picks and their probabilities. Nothing is loaded or run by the call; Claude then loads a picked skill or reads a picked tool's file. The exchange shows in the conversation as a tool call. Claude is told to skip it for plain conversation. It depends on Claude following that instruction: nothing forces the call, and `inject` load mode applies only to `prehint`.
+
 ## Saved tools
 
 Claude often writes a script for a piece of work (a converter, a check, a report). When the same kind of work comes again, it can start from that script instead of rewriting it.
@@ -196,6 +203,8 @@ With `jev_context_enabled` on (default), Jev gets up to `jev_context_chars` (120
 
 **Automatic probe.** With `auto_probe` on (default), the router probes without being asked: when a turn starts and a listed family's id or effort support is not known on this Claude Code (first use, or after an update), and when a routed request to a family fails (its id may have changed). Each family is probed at most once per load, with one tiny background subagent; a toast says so. The resend check is never armed automatically, since it sends a request meant to fail. A probe subagent's reply ("OK") would enter the conversation as another session's message and start a turn of its own, so it is dropped with one line, `jev-router: model probe finished`. Model routing `off` probes nothing.
 
+**Probing comes first.** A message that needs a probe does not go on until the probe ends. The order is: probe, then Jev chooses the model, then the conversation, then a skill or tool where one applies. When a family is unknown at the first message, the router starts its probe subagent and waits (the status line says `jev: probing sonnet before choosing a model`) until the family's id and effort support are learned, at most `probe_wait_ms` (20000 ms; 0 does not wait and probes at the turn as before). Then Jev is asked and the model chosen. If a routed request fails, it goes back to the probe: the family is probed again and waited for, then the same pair is asked again with the id just learned, up to two probes; after that the fallback model carries on. A failed request is asked again only where the resend check has passed and nothing was streamed yet; otherwise the family is probed and the fallback is used straight away. Probing relies on the probe subagent's steps reaching the router while the message waits; if they never do (an engine that holds the message until the hook returns), the wait runs out once and the message goes on.
+
 **Effort levels.** The five levels Claude Code names (`low`, `medium`, `high`, `xhigh`, `max`) are fixed in `model.ts`, and Jev judges every routable tier at every one. Claude Code silently lowers a level a model does not take, and a mod cannot learn which a model takes: a probe on Claude Code 2.1.296 showed that a subagent's step carries the level asked whatever the model, and that no classic event reports the level applied for a subagent `$.agent.spawn` started. So a pair Jev judges at `xhigh` or `max` may actually run one level lower, and it is costed at the level asked. Because the cheapest able pair runs, a higher level is chosen only when no cheaper pair is judged able, or when it is clearly likelier (by 0.05 or more) among pairs of nearly the same cost.
 
 ## Settings
@@ -209,6 +218,7 @@ The settings page holds the settings people change:
 | Write log | off |
 | Reset all settings to defaults | off |
 | Skill selection | on |
+| Selection mode (`selection_mode`) | prehint |
 | Tool selection (`tool_routing`) | on |
 | Let Claude save tools (`tool_save`) | on |
 | Tool selection threshold (`tool_threshold`) | 0.5 |
@@ -234,6 +244,7 @@ The rest are kept off the page, saved in `$.store`, and changed with `/jev-model
 | `cost_horizon` | 0 (learned from recent turns) | 0 to 100 requests |
 | `cost_tolerance` | 0.03 | 0 to 0.5 (share of the cheapest feasible cost) |
 | `auto_probe` | true | true / false |
+| `probe_wait_ms` | 20000 | 0 to 120000 ms the first message waits for a probe |
 | `tool_max` | 50 | 1 to 200 saved tools per scope |
 | `tool_hints` | 3 | 1 to 5 tools suggested per request |
 | `decision_confidence_threshold` | 0.6 | 0.5 to 1 |

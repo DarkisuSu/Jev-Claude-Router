@@ -70,6 +70,22 @@
       "max": 1,
       "default": 0.3
     },
+    "chat_notice": {
+      "type": "boolean",
+      "title": "General · Show choices in the conversation",
+      "description": "Add a line to the conversation, which you see and the model does not read, saying what Jev chose for each message: model and effort, skill, saved tool. The status line shows it too, where the host draws one.\nDefault: on",
+      "default": true
+    },
+    "selection_mode": {
+      "type": "string",
+      "title": "Skill & Tool · Selection mode",
+      "description": "prehint: Jev picks a skill or saved tool while your prompt is sent, and the picks ride beside it. consult: Claude is told only that the choice is Jev's and asks Jev with the consult tool before starting, so the exchange shows in the conversation. Model and effort are always chosen as the prompt is sent.\nDefault: prehint",
+      "options": [
+        "prehint",
+        "consult"
+      ],
+      "default": "prehint"
+    },
     "tool_routing": {
       "type": "boolean",
       "title": "Tool · Tool selection",

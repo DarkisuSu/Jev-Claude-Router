@@ -294,9 +294,12 @@ describe('model routing', () => {
     const first = await step($, 't1', 0)
     await step($, 't1', 1)
 
-    expect(seen.map(s => s.model)).toEqual([OPUS, SONNET, SONNET])
+    // The routed request, two more after a probe each, then the session model.
+    expect(seen.map(s => s.model)).toEqual([OPUS, OPUS, OPUS, SONNET, SONNET])
     expect(first.usage?.model).toBe(SONNET)
     expect(steps(w)[0]?.fallback).toContain('resent on the session model')
+    expect(steps(w)[0]?.fallback).toContain('after 2 probes')
+    expect(steps(w)[0]?.reprobes).toBe(2)
     expect(steps(w)[1]?.reasons).toContain('model:failed-this-session')
   })
 
@@ -381,19 +384,60 @@ describe('automatic probe', () => {
     return aliases
   }
 
-  test('first use: a turn start probes each family not known yet, once per load', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
-    mock.clock(on)
+  test('first use: the message waits for the probe, then Jev chooses the model; once per load', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
+    const clock = mock.clock(on)
     mock.store(on, LEARNED)
     const w = world(on, answers())
     bottom(on)
     const aliases = spawns(on)
 
-    await turn($, w)
-    // opus and haiku are learned; sonnet is not.
+    // opus and haiku are learned; sonnet is not: the message is held for it.
+    const submitted = $.prompt.submit({ text: PROMPT, asUser: true })
+    await clock.advance(300)
     expect(aliases).toEqual(['sonnet'])
+    expect(w.fetches).toHaveLength(0)
+    expect(w.status.at(-1)).toContain('probing sonnet before choosing a model')
+
+    // The probe's subagent answers; the message then goes on to Jev.
+    await step($, 'sub', 0, { model: SONNET, effort: 'medium', agentId: 'probe-1' })
+    await clock.advance(300)
+    await submitted
+    expect(w.fetches.length).toBeGreaterThan(0)
+    await $.turn.start({ text: PROMPT, turnId: 't1' })
+    const probe = logLines(w).find(l => l.type === 'probe' && l.kind === 'wait')
+    expect(probe).toMatchObject({ families: ['sonnet'], done: true })
     expect(logLines(w).find(l => l.type === 'probe' && l.kind === 'auto')?.families).toEqual(['sonnet'])
+
     await $.prompt.submit({ text: 'again', asUser: true })
     await $.turn.start({ text: 'again', turnId: 't2' })
+    expect(aliases).toEqual(['sonnet'])
+  })
+
+  test('a probe that never answers holds the message only for the wait, then it goes on', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
+    const clock = mock.clock(on)
+    mock.store(on, LEARNED)
+    const w = world(on, answers())
+    bottom(on)
+    spawns(on)
+
+    const submitted = $.prompt.submit({ text: PROMPT, asUser: true })
+    await clock.advance(19000)
+    expect(w.fetches).toHaveLength(0)
+    await clock.advance(2000)
+    await submitted
+    expect(w.fetches.length).toBeGreaterThan(0)
+    expect(logLines(w).find(l => l.type === 'probe' && l.kind === 'wait')).toMatchObject({ families: ['sonnet'], done: false })
+  })
+
+  test('probe_wait_ms 0 does not hold the message', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, { ...LEARNED, advanced: { probe_wait_ms: 0 } })
+    const w = world(on, answers())
+    bottom(on)
+    const aliases = spawns(on)
+    await turn($, w)
+    expect(w.fetches.length).toBeGreaterThan(0)
+    // The probe still starts, at the turn.
     expect(aliases).toEqual(['sonnet'])
   })
 
@@ -427,8 +471,9 @@ describe('automatic probe', () => {
     await turn($, w)
     expect(aliases).toEqual([])
     await step($, 't1', 0)
-    expect(aliases).toEqual(['opus'])
-    expect(logLines(w).find(l => l.type === 'probe' && l.kind === 'auto')?.why).toBe('a routed request to opus failed')
+    expect(aliases).toEqual(['opus', 'opus'])
+    const whys = logLines(w).filter(l => l.type === 'probe' && l.kind === 'auto').map(l => l.why)
+    expect(whys).toEqual(['a routed request to opus failed (probe 1 of 2)', 'a routed request to opus failed (probe 2 of 2)'])
   })
 })
 

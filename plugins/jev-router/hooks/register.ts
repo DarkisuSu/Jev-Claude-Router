@@ -45,6 +45,7 @@ import { cacheAdvice, cacheEvidence, observeUsage, resetCache, withContext, type
 import { SHARED, parseSetting, settingValue, sharedConfig } from './settings'
 import { JevError, route, type RouteResult, type Send } from './router'
 import { EMPTY_ATTEMPT, STATE_CHAR_BUDGET, STATE_RESERVE, recentContext, routingFacts, scrubText, type AttemptFacts } from './awareness'
+import { CONSULT_DESCRIPTION, CONSULT_SCHEMA, CONSULT_TOOL, consultInstructions, consultText, prepareConsult, type ConsultResult } from './consult'
 import { DECISION_TOOL, DECISION_DESCRIPTION, DECISION_INSTRUCTIONS, DECISION_SCHEMA, decisionText, prepareDecision, evaluateDecision } from './decisions'
 import {
   BODY_CHARS,
@@ -69,6 +70,11 @@ const OUTPUTS_KEY = 'outputs'
 const TURNLEN_KEY = 'turnlen'
 const KEPT_TURN_LENGTHS = 20
 const PROBE_TEXT = 'Reply with exactly: OK'
+// A routed request that fails goes back to the probe at most this many times
+// before the fallback model carries on.
+const MAX_REPROBES = 2
+// How often a waiting message looks at whether the probes have finished.
+const PROBE_POLL_MS = 250
 // A model id no account has: the probe's check that a failed request can be
 // sent again on the session's own model.
 const PROBE_BAD_MODEL = 'jev-router-probe-no-such-model'
@@ -78,6 +84,9 @@ type Config = {
   enabled: boolean
   skillRouting: boolean
   decisionRouting: boolean
+  selectionMode: 'prehint' | 'consult'
+  chatNotice: boolean
+  probeWaitMs: number
   tools: ReturnType<typeof sharedConfig>['tools']
   decisionConfidence: number
   mode: 'hint' | 'inject'
@@ -679,17 +688,20 @@ async function learnStep($: EngineInterface, step: { model: string; effort?: unk
 // Starts one tiny background subagent on a family's alias: the engine
 // resolves the alias (agent.spawn answers the full id) and the subagent's
 // first step shows effort support. Its reply is kept out of the conversation.
-async function probeFamily($: EngineInterface, family: Family, alias: string): Promise<string> {
+async function probeFamily($: EngineInterface, family: Family, alias: string): Promise<{ line: string; started: boolean }> {
   try {
     const r = await $.agent.spawn({ prompt: PROBE_TEXT, description: 'jev-router model probe', model: alias })
-    if (r.deny !== undefined) return `${family}: refused (${r.deny})`
+    if (r.deny !== undefined) return { line: `${family}: refused (${r.deny})`, started: false }
     if (r.agentId) S.probeAgents.add(r.agentId)
     await learnStep($, { model: r.model }, false, 'probe-spawn')
-    return familyOf(r.model) && r.model.toLowerCase() !== family
-      ? `${family}: ${alias} resolves to ${r.model}; its subagent is running`
-      : `${family}: subagent started; its full id is learned from its first step`
+    return {
+      line: familyOf(r.model) && r.model.toLowerCase() !== family
+        ? `${family}: ${alias} resolves to ${r.model}; its subagent is running`
+        : `${family}: subagent started; its full id is learned from its first step`,
+      started: true,
+    }
   } catch (err) {
-    return `${family}: could not start a subagent (${err instanceof Error ? err.message.slice(0, 120) : 'error'}); switch to it once with /model instead`
+    return { line: `${family}: could not start a subagent (${err instanceof Error ? err.message.slice(0, 120) : 'error'}); switch to it once with /model instead`, started: false }
   }
 }
 
@@ -701,20 +713,36 @@ const isKnown = (family: Family) => {
 // Probes, without being asked, each listed family whose id or effort support
 // is not known (first use, a Claude Code update) or that the caller names (a
 // routed request failed on it). Each family at most once per load.
-async function autoProbe($: EngineInterface, why: string, only?: Family) {
-  if (!S.config.autoProbe || S.config.routing === 'off') return
+async function autoProbe($: EngineInterface, why: string, only?: Family): Promise<Family[]> {
+  if (!S.config.autoProbe || S.config.routing === 'off') return []
   if (S.available.source === 'not-read') await refreshModels($)
   if (!S.version) await loadCaps($)
   const due = (Object.entries(S.available.models) as [Family, string][])
     .filter(([family]) => (only ? family === only : !isKnown(family)) && !S.autoProbed.has(family))
-  if (due.length === 0) return
+  if (due.length === 0) return []
   const lines: string[] = []
+  const started: Family[] = []
   for (const [family, alias] of due) {
     S.autoProbed.add(family)
-    lines.push(await probeFamily($, family, alias))
+    const probed = await probeFamily($, family, alias)
+    lines.push(probed.line)
+    if (probed.started) started.push(family)
   }
   await log($, { type: 'probe', kind: 'auto', why, families: due.map(([f]) => f), result: lines })
   $.ui.toast(`jev-router: learning ${due.map(([f]) => f).join(', ')} (${why}; one tiny background request each)`)
+  return started
+}
+
+// Holds a message until the probes it started have taught their families, or
+// the wait runs out: a probe that never answers must not stall the chat.
+async function waitForProbes($: EngineInterface, families: readonly Family[], waitMs: number): Promise<boolean> {
+  const until = (await $.clock.now()) + waitMs
+  while (!families.every(isKnown)) {
+    const left = until - (await $.clock.now())
+    if (left <= 0) return false
+    await $.clock.sleep(Math.min(PROBE_POLL_MS, left))
+  }
+  return true
 }
 
 // The session's model as the full id the caps know// The session's model as the full id the caps know, before a response was seen.
@@ -1186,6 +1214,75 @@ async function dataCommand($: EngineInterface, raw: string): Promise<string> {
   return 'jev-router: /jev-data [status | clear logs [today|all] | clear learned | clear tools [project|global|all] [--keep-files] | clear all [--keep-files]]'
 }
 
+// consult: Claude asks Jev which skill or saved tool fits, before starting.
+// Jev reads the task and the recent conversation; nothing is loaded or run.
+async function consultCall($: EngineInterface, input: unknown): Promise<ConsultResult> {
+  const config = S.config
+  if (!config.enabled || !config.key) return { status: 'unavailable', reason: !config.key ? 'no-key' : 'disabled' }
+  const prepared = prepareConsult(input)
+  if (!('task' in prepared)) return prepared
+  if (!S.hiddenLoaded) await loadHidden($)
+  const started = await $.clock.now()
+  const skills = config.skillRouting ? (await ensureIndex($)).skills : []
+  const library = config.tools.routing ? await loadTools($) : undefined
+  const toolOptions = library ? mergeTools(library.project, library.global) : []
+  if (skills.length === 0 && toolOptions.length === 0) return { status: 'nothing_fits', reason: 'there are no skills or saved tools to choose from' }
+  const sent = scrubText(prepared.task, [config.key])
+  let messages
+  if (config.awareness.enabled && config.awareness.maxChars > 0) {
+    try { messages = await $.session.messages() } catch { /* unknown */ }
+  }
+  const recent = recentContext(messages, sent, { ...config.awareness, maxChars: Math.min(config.awareness.maxChars, Math.max(0, STATE_CHAR_BUDGET - STATE_RESERVE - sent.length)) }, [config.key])
+  const result = await route(
+    sent,
+    skills,
+    { model: config.model, gateThreshold: config.gateThreshold, fitsThreshold: config.fitsThreshold, shortlist: config.shortlist, modelFamilies: [], recentContext: recent.text, tools: toolOptions },
+    sender($, started + config.timeoutMs),
+    () => $.clock.now(),
+  )
+  if (result.outcome === 'error') {
+    await log($, { type: 'consult', outcome: 'error', reason: result.reason, task_chars: sent.length, jev_calls: result.calls, total_ms: (await $.clock.now()) - started })
+    return { status: 'unavailable', reason: result.reason ?? 'jev failure' }
+  }
+  const pickedTools: { tool: SavedTool; probability: number }[] = []
+  for (const p of pickTools(result.tools, toolOptions, config.tools.threshold, config.tools.hints)) {
+    if (await $.fs.exists(p.tool.path)) pickedTools.push(p)
+  }
+  // The same bookkeeping as a hint: a picked skill's load and a picked tool's use are noted.
+  S.pending = result.selected.length > 0 ? { id: `consult-${started.toString(36)}`, selected: result.selected.map(s => s.name), delivery: Object.fromEntries(result.selected.map(s => [s.name, 'hint' as const])), loaded: new Set() } : undefined
+  S.hintedTools = pickedTools.map(p => p.tool)
+  await log($, {
+    type: 'consult',
+    outcome: result.selected.length + pickedTools.length > 0 ? 'picked' : 'nothing_fits',
+    reason: result.reason,
+    task_chars: sent.length,
+    index_size: skills.length,
+    tools: toolOptions.length > 0 ? { options: toolOptions.length, none: result.tools?.none ?? null, picked: pickedTools.map(p => ({ name: p.tool.name, scope: p.tool.scope, probability: p.probability })) } : undefined,
+    gate: result.gate,
+    shortlist: result.shortlist,
+    fits: result.fits,
+    selected: result.selected,
+    jev_calls: result.calls,
+    total_ms: (await $.clock.now()) - started,
+  })
+  $.ui.status(`jev: consulted · skill ${result.selected.map(s => s.name).join(', ') || '-'} · tool ${pickedTools.map(p => p.tool.name).join(', ') || '-'}`)
+  if (result.selected.length + pickedTools.length === 0) return { status: 'nothing_fits', reason: result.reason }
+  return {
+    status: 'picked',
+    skills: result.selected.map(s => ({ name: s.name, fits: s.fits, probability: s.probability })),
+    tools: pickedTools.map(p => ({ name: p.tool.name, scope: p.tool.scope, probability: p.probability, usage: p.tool.usage, path: p.tool.path, origin: isUserTool(p.tool) ? 'user' as const : 'assistant' as const })),
+  }
+}
+
+// A line in the conversation that the person sees and the model never reads.
+async function chatNotice($: EngineInterface, text: string) {
+  try {
+    await $.session.append({ message: { type: 'system', content: [{ type: 'text', text }] } })
+  } catch {
+    // A host that refuses the row still has the status line and the log.
+  }
+}
+
 function sender($: EngineInterface, deadline: number): Send {
   return async body => {
     const remaining = deadline - (await $.clock.now())
@@ -1311,7 +1408,7 @@ function statusText() {
     : 'no routed step yet'
   return [
     `jev-router model routing: ${c.routing} (the cheapest tier/effort Jev judges ≥ ${c.feasibleThreshold} feasible, the likeliest among those within ${Math.round(c.cost.tolerance * 100)}% of its cost; costed over ${horizonNow().horizon} requests (${horizonNow().source}); fallback ${c.fallback} when Jev gives no answer)`,
-    `skill selection: ${c.skillRouting ? 'on' : 'off'} (gate ≥ ${c.gateThreshold}, fits ≥ ${c.fitsThreshold}, shortlist ${c.shortlist}, load mode ${c.mode})`,
+    `skill selection: ${c.skillRouting ? 'on' : 'off'} (gate ≥ ${c.gateThreshold}, fits ≥ ${c.fitsThreshold}, shortlist ${c.shortlist}, load mode ${c.mode}, selection ${c.selectionMode})`,
     `saved tools: selection ${c.tools.routing ? 'on' : 'off'}, saving ${c.tools.save ? 'on' : 'off'} (see /jev-tool)`,
     `decision routing: ${c.decisionRouting ? 'on' : 'off'} (assistant-owned judgments only; confidence threshold ${c.decisionConfidence})`,
     `models from this Claude Code (${S.available.source}): ${fams}`,
@@ -1384,6 +1481,9 @@ export const register: Register = (on, options) => {
     if (config.enabled && config.key && config.tools.save) {
       await $.tool.register({ name: 'save_tool', description: SAVE_DESCRIPTION, inputSchema: SAVE_SCHEMA, isDeferred: false })
     }
+    if (config.enabled && config.key && config.selectionMode === 'consult' && (config.skillRouting || config.tools.routing)) {
+      await $.tool.register({ name: 'consult', description: CONSULT_DESCRIPTION, inputSchema: CONSULT_SCHEMA, isDeferred: false })
+    }
     if (config.enabled && config.key && config.decisionRouting) {
       await $.tool.register({ name: 'decide', description: DECISION_DESCRIPTION, inputSchema: DECISION_SCHEMA, isDeferred: false })
     }
@@ -1393,6 +1493,7 @@ export const register: Register = (on, options) => {
       has_key: config.key.length > 0,
       mode: config.mode,
       skill_routing: config.skillRouting,
+      selection_mode: config.selectionMode,
       routing: config.routing,
       gate_threshold: config.gateThreshold,
       fits_threshold: config.fitsThreshold,
@@ -1417,6 +1518,10 @@ export const register: Register = (on, options) => {
     }
     if (config.decisionRouting && e.tools.includes(DECISION_TOOL)) add('jev-router:decisions', DECISION_INSTRUCTIONS)
     if (config.tools.save && e.tools.includes(SAVE_TOOL)) add('jev-router:tools', SAVE_INSTRUCTIONS)
+    if (config.selectionMode === 'consult' && e.tools.includes(CONSULT_TOOL)) {
+      const library = config.tools.routing ? await loadTools($) : undefined
+      add('jev-router:consult', consultInstructions(library ? mergeTools(library.project, library.global) : [], config.routing !== 'off'))
+    }
     return sections === result.sections ? result : { ...result, sections }
   }).catch(($, e, next) => next(e))
 
@@ -1424,6 +1529,10 @@ export const register: Register = (on, options) => {
     const result = await saveToolCall($, { name: e.name, description: e.description, usage: e.usage, path: e.path, scope: e.scope })
     return { result: saveText(result) }
   }).catch(() => ({ result: saveText({ status: 'unavailable', reason: 'tool-hook-failed' }) }))
+
+  on('tool.call', { tool: 'mcp__jev-router__consult' }, async ($, e) => {
+    return { result: consultText(await consultCall($, { task: e.task })) }
+  }).catch(() => ({ result: consultText({ status: 'unavailable', reason: 'consult-hook-failed' }) }))
 
   // A saved tool the shell ran counts as a use.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
@@ -1506,13 +1615,27 @@ export const register: Register = (on, options) => {
 
     // Before the deadline is worked out: it uses the stored timeout.
     if (!S.hiddenLoaded) await loadHidden($)
+    // Probing comes first: a message that needs a probe (first use, a new
+    // Claude Code) waits for it to end, then Jev chooses the model.
+    let chosen = ''
+    if (!midTurn && config.routing !== 'off' && config.autoProbe && config.probeWaitMs > 0) {
+      const probing = await autoProbe($, 'first use on this Claude Code')
+      if (probing.length > 0) {
+        $.ui.status(`jev: probing ${probing.join(', ')} before choosing a model`)
+        const waitStart = await $.clock.now()
+        const done = await waitForProbes($, probing, config.probeWaitMs)
+        await log($, { type: 'probe', kind: 'wait', families: probing, done, waited_ms: (await $.clock.now()) - waitStart })
+      }
+    }
     const started = await $.clock.now()
     const deadline = started + config.timeoutMs
     // Skill selection off: no index is built and no skill is asked about.
-    const skills = config.skillRouting ? (await ensureIndex($)).skills : []
+    // In consult mode Claude asks for skills and tools itself, so neither is asked here.
+    const consulting = config.selectionMode === 'consult'
+    const skills = config.skillRouting && !consulting ? (await ensureIndex($)).skills : []
     // Saved tools Jev may pick from: the project's and the global ones, a
     // project tool hiding a global one of the same name.
-    const library = config.tools.routing ? await loadTools($) : undefined
+    const library = config.tools.routing && !consulting ? await loadTools($) : undefined
     const toolOptions = library ? mergeTools(library.project, library.global) : []
     if (S.available.source === 'not-read') await refreshModels($)
     if (!S.version) await loadCaps($)
@@ -1551,7 +1674,8 @@ export const register: Register = (on, options) => {
 
     // Jev judged each tier and effort; the cheapest feasible pair runs.
     const evidence = cacheEvidence(S.cache, await $.clock.now(), cacheNow())
-    if (!config.skillRouting && result.reason === 'empty-index') result.reason = 'skill-routing-off'
+    if (consulting && result.reason === 'empty-index') result.reason = 'consult-mode'
+    else if (!config.skillRouting && result.reason === 'empty-index') result.reason = 'skill-routing-off'
 
     const decision = decide(id, result.feasible, families, (family: Family, effort: Effort) => {
       const known = S.caps?.families[family]
@@ -1565,7 +1689,8 @@ export const register: Register = (on, options) => {
       // chat panel draws it is host-dependent; the model and effort the panel
       // shows are the session's and cannot be set from a mod.
       const chose = `${decision.family ?? `keep(${decision.modelReason ?? '-'})`}/${decision.effort ?? `keep(${decision.effortReason ?? '-'})`}`
-      $.ui.status(`jev: ${chose}${config.routing === 'dry-run' ? ' (dry-run)' : ''}`)
+      chosen = `${chose}${config.routing === 'dry-run' ? ' (dry-run)' : ''}`
+      $.ui.status(`jev: model ${chosen}`)
     }
 
     const delivery: Record<string, 'hint' | 'inject'> = {}
@@ -1597,6 +1722,15 @@ export const register: Register = (on, options) => {
       context.push(toolHint(pickedTools))
       if (!midTurn) S.hintedTools = pickedTools.map(p => p.tool)
     }
+    // What Jev chose, in one line: the model, then any skill or tool.
+    if (!midTurn) {
+      // Always all three, so "nothing chosen" shows as plainly as a choice.
+      const skillText = consulting ? 'consult' : !config.skillRouting ? 'off' : result.selected.length > 0 ? result.selected.map(s => s.name).join(', ') : 'none'
+      const toolText = consulting ? 'consult' : !config.tools.routing ? 'off' : pickedTools.length > 0 ? pickedTools.map(p => p.tool.name).join(', ') : 'none'
+      const summary = `model ${chosen || 'off'} · skill ${skillText} · tool ${toolText}`
+      $.ui.status(`jev: ${summary}`)
+      if (config.chatNotice) await chatNotice($, `jev-router: ${summary}`)
+    }
 
     await log($, {
       type: 'round',
@@ -1605,6 +1739,7 @@ export const register: Register = (on, options) => {
       sent_chars: sent.length,
       index_size: skills.length,
       skill_routing: config.skillRouting,
+      selection_mode: config.selectionMode,
       tools: toolOptions.length > 0 ? { options: toolOptions.length, none: result.tools?.none ?? null, picked: pickedTools.map(p => ({ name: p.tool.name, scope: p.tool.scope, probability: p.probability })), stale: staleTools } : undefined,
       mode: config.mode,
       outcome: result.outcome,
@@ -1770,36 +1905,63 @@ export const register: Register = (on, options) => {
       return result
     }
 
-    const sent = { ...e, model: plan.model, effort: plan.effort as typeof e.effort }
+    let sent = { ...e, model: plan.model, effort: plan.effort as typeof e.effort }
     let result
     let failure: unknown
     let streamed = false
-    try {
-      const stream = next(sent)
-      let completed = false
+    let failed = false
+    let reprobes = 0
+    for (;;) {
+      result = undefined
+      failure = undefined
       try {
-        let item = await stream.next()
-        while (!item.done) {
-          streamed = true
-          yield item.value
-          item = await stream.next()
+        const stream = next(sent)
+        let completed = false
+        try {
+          let item = await stream.next()
+          while (!item.done) {
+            streamed = true
+            yield item.value
+            item = await stream.next()
+          }
+          result = item.value
+          completed = true
+        } finally {
+          if (!completed) await stream.return(undefined as never)
         }
-        result = item.value
-        completed = true
-      } finally {
-        if (!completed) await stream.return(undefined as never)
+      } catch (err) {
+        failure = err
       }
-    } catch (err) {
-      failure = err
+      failed = !next.signal.aborted && result?.usage == null && result?.stopReason == null
+      const family = familyOf(sent.model)
+      // The routed request failed: back to the probe, which relearns the id and
+      // is waited for, then the same pair is asked again. Twice at most; then
+      // the fallback. Only where a failed step is known to be safe to send again.
+      if (!failed || !family || reprobes >= MAX_REPROBES || !config.autoProbe || !S.caps?.retryOk || streamed) break
+      reprobes++
+      S.autoProbed.delete(family)
+      const probing = await autoProbe($, `a routed request to ${family} failed (probe ${reprobes} of ${MAX_REPROBES})`, family)
+      if (probing.length > 0) await waitForProbes($, probing, config.probeWaitMs)
+      sent = { ...sent, model: S.caps?.families[family]?.id ?? sent.model }
+      entry.reprobes = reprobes
+      requestAt = await $.clock.now()
     }
-    const failed = !next.signal.aborted && result?.usage == null && result?.stopReason == null
+    if (reprobes > 0 && !failed) {
+      // A later step of this turn goes the way this one did.
+      entry.sent_model = sent.model
+      S.turnPlans.set(e.turnId, { plan: { ...final, model: sent.model, effort: sent.effort }, advice: frozen.advice })
+    }
     if (failed) {
+      const target = familyOf(sent.model)
       if (target) {
         S.failed.add(target)
-        // Its id may have changed with an update: learn it again.
-        await autoProbe($, `a routed request to ${target} failed`, target)
+        // Its id may have changed with an update: learn it again, and wait.
+        if (reprobes === 0) {
+          const probing = await autoProbe($, `a routed request to ${target} failed`, target)
+          if (probing.length > 0) await waitForProbes($, probing, config.probeWaitMs)
+        }
       }
-      entry.fallback = 'routed-request-failed'
+      entry.fallback = reprobes > 0 ? `routed-request-failed after ${reprobes} probe${reprobes === 1 ? '' : 's'}` : 'routed-request-failed'
       entry.failed_recommendation = entry.final_recommended
       // Pin every remaining step to the fallback. Never retry the same bad
       // target inside a tool loop or silently re-evaluate Jev's recommendation.
@@ -1808,7 +1970,7 @@ export const register: Register = (on, options) => {
       if (S.caps?.retryOk && !streamed) {
         requestAt = await $.clock.now()
         result = yield* next(e)
-        entry.fallback = 'routed-request-failed: resent on the session model'
+        entry.fallback = `${String(entry.fallback)}: resent on the session model`
         entry.sent_model = e.model
         entry.sent_effort = e.effort
         entry.final_recommended = { model: e.model, effort: e.effort }
@@ -1991,7 +2153,7 @@ export const register: Register = (on, options) => {
           lines.push(`${family}: already known (${S.caps!.families[family]!.id})`)
           continue
         }
-        lines.push(await probeFamily($, family, alias))
+        lines.push((await probeFamily($, family, alias)).line)
       }
       if (lines.length === 0) return { text: 'jev-router: this Claude Code lists no Haiku, Sonnet or Opus model to probe.' }
       if (S.caps?.retryOk === undefined) {
