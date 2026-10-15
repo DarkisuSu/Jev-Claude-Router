@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
-import { CONSULT_TOOL, consultInstructions, prepareConsult } from './consult'
+import { CONSULT_TOOL, SKILL_TEXT_CHARS, SKILL_TEXT_TOTAL, consultInstructions, prepareConsult, skillTexts } from './consult'
 import { SAVE_TOOL } from './tools'
 import { FAKE_KEY, logLines, memoryStore, PROMPT, rankWide, rerank, world, type World } from './testkit'
 
@@ -15,6 +15,17 @@ describe('consult instructions and input', () => {
     expect(text).toContain('Use only a skill or a saved tool that Jev returned')
     expect(text).not.toContain('Saved tools Jev can pick from')
     expect(consultInstructions(false)).toContain('the choice of a skill or a saved tool is delegated')
+  })
+  test('picked skills\' own text is delivered, each cut to a bound and all to a total; a skill without a file has none', () => {
+    const long = 'x'.repeat(SKILL_TEXT_CHARS + 50)
+    const texts = skillTexts([{ name: 'a', body: 'do a' }, { name: 'b' }, { name: 'c', body: long }])
+    expect(texts.a).toBe('do a')
+    expect('b' in texts).toBe(false)
+    expect(texts.c).toContain('[cut: the rest of the skill is not shown]')
+    expect(texts.c!.length).toBeLessThan(SKILL_TEXT_CHARS + 100)
+    const many = skillTexts(Array.from({ length: 5 }, (_, i) => ({ name: `s${i}`, body: 'y'.repeat(SKILL_TEXT_CHARS) })))
+    expect(Object.values(many).reduce((n, v) => n + v.length, 0)).toBeLessThanOrEqual(SKILL_TEXT_TOTAL)
+    expect(consultInstructions(true)).toContain('do not load it again with the Skill tool')
   })
   test('a task is required, flattened to one line', () => {
     expect(prepareConsult({ task: '  fix\n the   ledger ' })).toEqual({ task: 'fix the ledger' })

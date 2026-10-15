@@ -45,7 +45,7 @@ import { cacheAdvice, cacheEvidence, observeUsage, resetCache, withContext, type
 import { SHARED, parseSetting, settingValue, sharedConfig } from './settings'
 import { JevError, route, type RouteResult, type Send } from './router'
 import { EMPTY_ATTEMPT, STATE_CHAR_BUDGET, STATE_RESERVE, recentContext, routingFacts, scrubText, type AttemptFacts } from './awareness'
-import { CONSULT_DESCRIPTION, CONSULT_SCHEMA, CONSULT_TOOL, consultInstructions, consultText, prepareConsult, type ConsultResult } from './consult'
+import { CONSULT_DESCRIPTION, CONSULT_SCHEMA, CONSULT_TOOL, consultInstructions, consultText, prepareConsult, skillTexts, type ConsultResult } from './consult'
 import { DECISION_TOOL, DECISION_DESCRIPTION, DECISION_INSTRUCTIONS, DECISION_SCHEMA, decisionText, prepareDecision, evaluateDecision } from './decisions'
 import {
   BODY_CHARS,
@@ -88,6 +88,7 @@ type Config = {
   skillRouting: boolean
   decisionRouting: boolean
   selectionMode: 'prehint' | 'consult'
+  consultSkillText: boolean
   chatNotice: boolean
   probeWaitMs: number
   tools: ReturnType<typeof sharedConfig>['tools']
@@ -1312,9 +1313,11 @@ async function consultCall($: EngineInterface, input: unknown, agentId?: string)
   })
   if (agentId === undefined) await consultNotice($, `skill ${result.selected.map(s => s.name).join(', ') || 'none'} · tool ${pickedTools.map(p => p.tool.name).join(', ') || 'none'}`)
   if (result.selected.length + pickedTools.length === 0) return { status: 'nothing_fits', reason: result.reason }
+  // The picked skills' own text, so the skill need not be listed to Claude.
+  const texts = config.consultSkillText ? skillTexts(result.selected.map(s => ({ name: s.name, body: skills.find(k => k.name === s.name)?.body }))) : {}
   return {
     status: 'picked',
-    skills: result.selected.map(s => ({ name: s.name, fits: s.fits, probability: s.probability })),
+    skills: result.selected.map(s => ({ name: s.name, fits: s.fits, probability: s.probability, ...(texts[s.name] !== undefined ? { instructions: texts[s.name] } : {}) })),
     tools: pickedTools.map(p => ({ name: p.tool.name, scope: p.tool.scope, probability: p.probability, usage: p.tool.usage, path: p.tool.path, origin: isUserTool(p.tool) ? 'user' as const : 'assistant' as const })),
   }
 }
