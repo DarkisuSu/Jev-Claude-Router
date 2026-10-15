@@ -49,7 +49,7 @@ const step = async ($: Engine, turnId: string, index: number, extra: Record<stri
 const answers = (feasible: Record<string, number> = {}) =>
   (q: Record<string, unknown>) =>
     // Request 1 carries the skill gates and/or the model questions; Jev answers what is asked.
-    'acts_on_user_system' in q || Object.keys(q).some(k => k.startsWith('feasible::'))
+    'catalog_has_match' in q || Object.keys(q).some(k => k.startsWith('feasible::'))
       ? { status: 200, body: rankWide(0.9, 'speckit-specify', feasible, q) }
       : { status: 200, body: rerank(q, { 'speckit-specify': 0.2 }) }
 
@@ -487,7 +487,7 @@ describe('skill selection switch', () => {
     const w = world(on, answers({ 'opus::high': 0.9 }))
     bottom(on)
     await turn($, w)
-    expect(Object.keys(wideQuestions(w))).toEqual(expect.arrayContaining(['which', 'acts_on_user_system', 'feasible::opus::high']))
+    expect(Object.keys(wideQuestions(w))).toEqual(expect.arrayContaining(['which', 'catalog_has_match', 'feasible::opus::high']))
     expect(logLines(w).find(l => l.type === 'round')?.skill_routing).toBe(true)
   })
 

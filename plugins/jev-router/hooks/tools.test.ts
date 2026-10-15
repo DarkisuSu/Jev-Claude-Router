@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { SAVE_INSTRUCTIONS, SAVE_TOOL, isUserTool, mergeTools, parseReusable, pickTools, prepareTool, readLibrary, toolHint, touchTool, upsertTool, usesTool, type SavedTool } from './tools'
+import { SAVE_INSTRUCTIONS, SAVE_TOOL, isUserTool, mergeTools, parseReusable, bestTool, prepareTool, readLibrary, toolHint, touchTool, upsertTool, usesTool, type SavedTool } from './tools'
 import { DECISION_INSTRUCTIONS, DECISION_TOOL } from './decisions'
 import { saveQuestion, toolQuestion } from './questions'
 import { rankWideBody, route } from './router'
@@ -18,7 +18,7 @@ describe('saved tool validation', () => {
     expect(prepareTool({ ...GOOD, description: 'Converts\n  CSV   to JSON' })).toMatchObject({ tool: { description: 'Converts CSV to JSON' } })
   })
   test('bad names, scopes and paths are refused with a reason', () => {
-    for (const bad of [{ name: 'none' }, { name: '1abc' }, { name: 'has space' }, { scope: 'user' }, { path: 'tools/x.py' }, { path: 'C:/work/../secret.py' }, { path: '' }, { path: 'C:/work/a|b.py' }]) {
+    for (const bad of [{ name: '1abc' }, { name: 'has space' }, { scope: 'user' }, { path: 'tools/x.py' }, { path: 'C:/work/../secret.py' }, { path: '' }, { path: 'C:/work/a|b.py' }]) {
       expect(prepareTool({ ...GOOD, ...bad })).toMatchObject({ status: 'invalid_request' })
     }
     expect(prepareTool(undefined)).toMatchObject({ status: 'invalid_request' })
@@ -84,12 +84,14 @@ describe('the library', () => {
 
 describe('picking and suggesting', () => {
   const known = [tool({ name: 'a' }), tool({ name: 'b' }), tool({ name: 'c' })]
-  test('tools at or above the threshold are picked, likeliest first, up to the maximum; none and unknown names never', () => {
-    const p = { none: 0.05, a: 0.3, b: 0.5, c: 0.45, ghost: 0.9 }
-    expect(pickTools(p, known, 0.4, 5).map(x => x.tool.name)).toEqual(['b', 'c'])
-    expect(pickTools(p, known, 0.4, 1).map(x => x.tool.name)).toEqual(['b'])
-    expect(pickTools(p, known, 0.6, 3)).toEqual([])
-    expect(pickTools(undefined, known, 0.1, 3)).toEqual([])
+  test('once Jev says a saved tool does what is asked, the best-fitting one is picked; an unknown name never', () => {
+    const p = { a: 0.3, b: 0.5, c: 0.2, ghost: 0.9 }
+    expect(bestTool(0.8, p, known, 0.5)?.tool.name).toBe('b')
+    expect(bestTool(0.5, p, known, 0.5)?.tool.name).toBe('b')
+    expect(bestTool(0.4, p, known, 0.5)).toBeUndefined()
+    expect(bestTool(undefined, p, known, 0.5)).toBeUndefined()
+    expect(bestTool(0.9, undefined, known, 0.5)).toBeUndefined()
+    expect(bestTool(0.9, { ghost: 1 }, known, 0.5)).toBeUndefined()
   })
   test('the hint says a person-written file may fit, with where and how to run it, and carries no markup of its own', () => {
     const hint = toolHint([{ tool: tool({ description: 'Converts <b>CSV</b> `now`\nplease' }) }])
@@ -112,10 +114,10 @@ describe('picking and suggesting', () => {
     expect(parseReusable('{"answers":{"reusable":{"type":"noul","noul":0.7}}}')).toBe(0.7)
     for (const bad of ['not json', '{"answers":{}}', '{"answers":{"reusable":{"type":"choice"}}}', '{"answers":{"reusable":{"type":"noul","noul":2}}}']) expect(parseReusable(bad)).toBeUndefined()
   })
-  test('the questions carry a none option, the tools and their scope; saving is judged from words alone', () => {
+  test('the tool questions carry the tools and their scope, with no none option; saving is judged from words alone', () => {
     const q = toolQuestion([{ name: 'a', description: 'does a', scope: 'project' }])
     expect(q).toMatchObject({ type: 'choice', criteria: { a: 'does a (project tool)' } })
-    expect(Object.keys((q as { criteria: object }).criteria)).toEqual(['none', 'a'])
+    expect(Object.keys((q as { criteria: object }).criteria)).toEqual(['a'])
     expect(saveQuestion(GOOD)).toMatchObject({ type: 'noul' })
     expect(JSON.stringify(saveQuestion(GOOD))).not.toContain(FILE)
   })
@@ -124,20 +126,31 @@ describe('picking and suggesting', () => {
 describe('tool question in the routing request', () => {
   const cfg = { model: 'jev-latest', gateThreshold: 0.3, fitsThreshold: 0.3, shortlist: 3, modelFamilies: [] as string[] }
   const tools = [{ name: 'a', description: 'does a', scope: 'project' }]
-  const answer = (probabilities: Record<string, number>) => ({ model: 'j', answers: { tool_which: { type: 'choice', choice: 'a', probabilities, confidence: 0.8 } } })
+  const answer = (probabilities: Record<string, number>, match = 0.9) => ({ model: 'j', answers: { tool_has_match: { type: 'noul', noul: match }, tool_which: { type: 'choice', choice: 'a', probabilities, confidence: 0.8 } } })
   test('with tools alone, one request asks only the tool question and its probabilities come back', async () => {
     const bodies: any[] = []
     const result = await route(PROMPT, [], { ...cfg, tools }, async body => {
       bodies.push(JSON.parse(body))
-      return { status: 200, text: JSON.stringify(answer({ none: 0.1, a: 0.9 })) }
+      return { status: 200, text: JSON.stringify(answer({ a: 1 })) }
     }, async () => 0)
     expect(bodies).toHaveLength(1)
-    expect(Object.keys(bodies[0].questions)).toEqual(['tool_which'])
-    expect(result.tools).toEqual({ none: 0.1, a: 0.9 })
+    expect(Object.keys(bodies[0].questions)).toEqual(['tool_has_match', 'tool_which'])
+    expect(result.toolMatch).toBe(0.9)
+    expect(result.tools).toEqual({ a: 1 })
+  })
+  test('the saved tools ride in the state, beside a yes/no question over them', async () => {
+    const bodies: any[] = []
+    await route(PROMPT, [], { ...cfg, tools }, async body => {
+      bodies.push(JSON.parse(body))
+      return { status: 200, text: JSON.stringify(answer({ a: 1 })) }
+    }, async () => 0)
+    expect(bodies[0].state.saved_tools).toEqual(['a: does a'])
+    expect(bodies[0].questions.tool_has_match.instructions).toContain('saved_tools')
+    expect(Object.keys(bodies[0].questions.tool_which.criteria)).toEqual(['a'])
   })
   test('no tools, no question; malformed probabilities are dropped, not an error', async () => {
     expect(Object.keys(rankWideBody(PROMPT, [], { ...cfg, modelFamilies: ['opus'] }).questions).includes('tool_which')).toBe(false)
-    const result = await route(PROMPT, [], { ...cfg, tools }, async () => ({ status: 200, text: JSON.stringify(answer({ none: 'x' as never, a: 7 })) }), async () => 0)
+    const result = await route(PROMPT, [], { ...cfg, tools }, async () => ({ status: 200, text: JSON.stringify(answer({ a: 7 })) }), async () => 0)
     expect(result.tools).toBeUndefined()
     expect(result.outcome).toBe('no-match')
   })
@@ -149,9 +162,10 @@ const OPTS = { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'off'
 type Jev = { tool?: Record<string, number>; reusable?: number | 'fail' }
 const jevFor = (j: Jev) => (q: Record<string, unknown>) => {
   if ('reusable' in q) return j.reusable === 'fail' ? { status: 500, body: {} } : { status: 200, body: { model: 'jev-test', answers: { reusable: { type: 'noul', noul: j.reusable ?? 0.9 } } } }
-  const body: any = 'acts_on_user_system' in q ? rankWide(0.9, 'speckit-specify', {}, q) : rerank(q, { 'speckit-specify': 0.9 })
+  const body: any = 'catalog_has_match' in q ? rankWide(0.9, 'speckit-specify', {}, q) : rerank(q, { 'speckit-specify': 0.9 })
   if ('tool_which' in q) {
     const probabilities = j.tool ?? { none: 1 }
+    body.answers.tool_has_match = { type: 'noul', noul: 1 - (probabilities.none ?? 0) }
     body.answers.tool_which = { type: 'choice', choice: Object.entries(probabilities).sort((a, b) => b[1] - a[1])[0]![0], probabilities, confidence: 0.8 }
   }
   return { status: 200, body }
@@ -216,7 +230,7 @@ describe('save_tool', () => {
     const w = world(on, jevFor({}))
     expect(result(await save($)).reason).toContain('path does not exist')
     withFile(w)
-    expect(result(await save($, { name: 'none' })).status).toBe('invalid_request')
+    expect(result(await save($, { name: 'has space' })).status).toBe('invalid_request')
     expect(result(await save($, { description: 'uses ' + FAKE_KEY })).status).toBe('invalid_request')
     expect(w.fetches).toHaveLength(0)
   })
@@ -266,19 +280,19 @@ describe('choosing a saved tool', () => {
     await begin($)
     const asked = toolBodies(w)
     expect(asked).toHaveLength(1)
-    expect(Object.keys(asked[0].questions)).toEqual(['tool_which'])
+    expect(Object.keys(asked[0].questions)).toEqual(['tool_has_match', 'tool_which'])
     expect(asked[0].questions.tool_which.criteria.csv_to_json).toBe('Converts CSV exports to JSON (project tool)')
     const hint = (w.seen?.context ?? []).join('\n')
     expect(hint).toContain('<tool_relevance')
     expect(hint).toContain(`file: ${FILE}`)
     expect(hint).toContain('run: python tools/csv_to_json.py in.csv out.json')
     const round = logLines(w).find(l => l.type === 'round')!
-    expect(round.tools).toEqual({ options: 1, none: 0.1, picked: [{ name: 'csv_to_json', scope: 'project', probability: 0.85 }], stale: 0 })
+    expect(round.tools).toEqual({ options: 1, match: 0.9, picked: [{ name: 'csv_to_json', scope: 'project', probability: 0.85 }], stale: 0 })
     expect(JSON.stringify(round)).not.toContain(FILE)
   })
-  test('below the selection threshold, or with none likelier, nothing is suggested', { options: { ...OPTS, tool_threshold: 0.9 } }, async ($, on) => {
+  test('below the selection threshold nothing is suggested', { options: { ...OPTS, tool_threshold: 0.9 } }, async ($, on) => {
     mock.clock(on); memoryStore(on)
-    const w = world(on, jevFor({ tool: { none: 0.1, csv_to_json: 0.85 } })); withFile(w)
+    const w = world(on, jevFor({ tool: { none: 0.2, csv_to_json: 0.8 } })); withFile(w)
     await save($)
     await begin($)
     expect((w.seen?.context ?? []).join('\n')).not.toContain('tool_relevance')
@@ -316,7 +330,7 @@ describe('choosing a saved tool', () => {
     const before = w.fetches.length
     await begin($)
     const wide = JSON.parse(w.fetches[before]!.body)
-    expect(Object.keys(wide.questions)).toEqual(expect.arrayContaining(['which', 'acts_on_user_system', 'tool_which']))
+    expect(Object.keys(wide.questions)).toEqual(expect.arrayContaining(['which', 'catalog_has_match', 'tool_which']))
   })
   test('a global tool is offered in any project, and a project tool of the same name wins', { options: OPTS }, async ($, on) => {
     mock.clock(on); memoryStore(on)
@@ -354,7 +368,7 @@ describe('/jev-tool', () => {
     await save($, { name: 'g', path: 'C:/work/g.py', scope: 'global', description: 'Global helper' })
     w.written.delete('C:/work/g.py')
     const list = await run($, 'list')
-    expect(list).toContain('tools: selection on (suggested at ≥ 0.5, up to 3); Claude may save on')
+    expect(list).toContain('tools: selection on (suggested at ≥ 0.5); Claude may save on')
     expect(list).toContain('1 project, 1 global')
     expect(list).toContain('csv_to_json · used 0 · Converts CSV exports to JSON')
     expect(list).toMatch(/g · used 0 · Global helper .*\[file missing\]/)
@@ -434,7 +448,7 @@ describe('tools the person registers', () => {
     expect(await run($, `add g ${FILE} global Global helper`)).toContain('registered g (global)')
     expect(lib(stored, 'global')).toMatchObject([{ name: 'g', origin: 'user' }])
     expect(await run($, 'add x C:/nope.py Does something')).toContain('no file at C:/nope.py')
-    expect(await run($, `add none ${FILE} words`)).toContain('/jev-tool add')
+    expect(await run($, `add 1abc ${FILE} words`)).toContain('/jev-tool add')
     expect(await run($, 'add')).toContain('/jev-tool add <name>')
   })
   test('an assistant cannot overwrite a tool the person registered', { options: OPTS }, async ($, on) => {

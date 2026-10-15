@@ -129,7 +129,7 @@ type Choice = { model: string; score: number; fail?: boolean }
 const LEVELS = ['low', 'medium', 'high', 'xhigh', 'max']
 const jev = (choice: Choice) => (q: Record<string, unknown>) => {
   if (choice.fail) return { status: 500, body: { error: 'down' } }
-  const body: any = 'acts_on_user_system' in q ? rankWide(0.9, 'speckit-specify', { [`${choice.model}::${LEVELS[choice.score]}`]: 0.95 }, q) : rerank(q, { 'speckit-specify': 0.9 })
+  const body: any = 'catalog_has_match' in q ? rankWide(0.9, 'speckit-specify', { [`${choice.model}::${LEVELS[choice.score]}`]: 0.95 }, q) : rerank(q, { 'speckit-specify': 0.9 })
   return { status: 200, body }
 }
 const begin = async ($: Engine, id: string) => {

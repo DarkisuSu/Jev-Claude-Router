@@ -11,9 +11,10 @@ const PREHINT = { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'o
 type Jev = { tool?: Record<string, number>; skill?: number; fail?: boolean }
 const jevFor = (j: Jev = {}) => (q: Record<string, unknown>) => {
   if (j.fail) return { status: 500, body: {} }
-  const body: any = 'acts_on_user_system' in q ? rankWide(0.9, 'speckit-specify', {}, q) : rerank(q, { 'speckit-specify': j.skill ?? 0.9 })
+  const body: any = 'catalog_has_match' in q ? rankWide(0.9, 'speckit-specify', {}, q) : rerank(q, { 'speckit-specify': j.skill ?? 0.9 })
   if ('tool_which' in q) {
     const probabilities = j.tool ?? { none: 1 }
+    body.answers.tool_has_match = { type: 'noul', noul: 1 - (probabilities.none ?? 0) }
     body.answers.tool_which = { type: 'choice', choice: Object.entries(probabilities).sort((a, b) => b[1] - a[1])[0]![0], probabilities, confidence: 0.8 }
   }
   return { status: 200, body }

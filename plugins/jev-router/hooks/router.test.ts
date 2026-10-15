@@ -7,7 +7,7 @@ import { COMMANDS, FAKE_KEY, PROMPT, logLines, rankWide, rerank, world, type Wor
 
 const rounds = (w: World) => logLines(w).filter(r => r.type === 'round')
 
-const isWide = (q: Record<string, unknown>) => 'acts_on_user_system' in q
+const isWide = (q: Record<string, unknown>) => 'catalog_has_match' in q
 
 describe('skill router', () => {
   test('match: a skill whose fits clears the 0.3 default rides beside the prompt as a hint', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
@@ -154,6 +154,36 @@ describe('route', () => {
     const result = await route(PROMPT, skills, cfg, send, now)
     expect(result.outcome).toBe('error')
     expect(result.selected).toEqual([])
+  })
+
+  test('the gate is two yes/no questions over the listed skills, and the larger answer opens it', async () => {
+    const first = skills[0]!.name
+    const wideAnswers = (named: number, matched: number) => ({
+      model: 'jev-test-1',
+      answers: {
+        which: { type: 'choice', choice: first, probabilities: { [first]: 1 }, confidence: 1 },
+        names_a_workflow: { type: 'noul', noul: named },
+        catalog_has_match: { type: 'noul', noul: matched },
+      },
+    })
+    const rerankAnswers = { model: 'jev-test-1', answers: { [`fits::${first}`]: { type: 'noul', noul: 0.9 }, which: { type: 'choice', choice: first, probabilities: { [first]: 1 }, confidence: 1 } } }
+    const run = async (named: number, matched: number) => {
+      const bodies: any[] = []
+      const send = async (body: string) => {
+        const b = JSON.parse(body)
+        bodies.push(b)
+        return { status: 200, text: JSON.stringify(`fits::${first}` in b.questions ? rerankAnswers : wideAnswers(named, matched)) }
+      }
+      const result = await route(PROMPT, skills, { ...cfg, gateThreshold: 0.5 }, send, now)
+      return { result, wide: bodies[0] }
+    }
+    const { result: neither, wide } = await run(0.1, 0.2)
+    expect(Object.keys(wide.questions)).toEqual(expect.arrayContaining(['which', 'names_a_workflow', 'catalog_has_match']))
+    expect(wide.questions).not.toHaveProperty('acts_on_user_system')
+    expect(wide.state.available_skills).toEqual(skills.map(s => `${s.name}: ${s.description}`))
+    expect(neither).toMatchObject({ outcome: 'no-match', reason: 'gate', gate: { score: 0.2 } })
+    expect((await run(0.9, 0.1)).result.outcome).toBe('selected')
+    expect((await run(0.1, 0.9)).result.outcome).toBe('selected')
   })
 
   test('model questions ride request 1 even with an empty skill index', async () => {

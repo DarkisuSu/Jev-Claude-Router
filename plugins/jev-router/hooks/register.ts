@@ -28,7 +28,7 @@ import {
   SAVE_TOOL,
   mergeTools,
   parseReusable,
-  pickTools,
+  bestTool,
   prepareTool,
   readLibrary,
   saveText,
@@ -122,7 +122,7 @@ export const readConfig = (o: PluginOptions): Config => ({
   skillRouting: o.skill_routing !== false,
   mode: o.mode === 'inject' ? 'inject' : 'hint',
   shortlist: 3,
-  gateThreshold: num(o.gate_threshold, 0.3, 0, 1),
+  gateThreshold: num(o.gate_threshold, 0.5, 0, 1),
   fitsThreshold: num(o.fits_threshold, 0.3, 0, 1),
   resetRequested: o.reset_to_defaults === true,
   writeLog: o.write_log === true,
@@ -1105,7 +1105,7 @@ async function addUserTool($: EngineInterface, args: readonly string[]): Promise
 async function toolStatus($: EngineInterface) {
   const c = S.config.tools
   const library = await loadTools($)
-  return `tools: selection ${c.routing ? 'on' : 'off'} (suggested at ≥ ${c.threshold}, up to ${c.hints}); Claude may save ${c.save ? 'on' : 'off'} (saved when Jev judges ≥ ${c.saveThreshold} reusable, up to ${c.max} per scope); ${library.project.length} project, ${library.global.length} global. Manage with /jev-tool.`
+  return `tools: selection ${c.routing ? 'on' : 'off'} (suggested at ≥ ${c.threshold}); Claude may save ${c.save ? 'on' : 'off'} (saved when Jev judges ≥ ${c.saveThreshold} reusable, up to ${c.max} per scope); ${library.project.length} project, ${library.global.length} global. Manage with /jev-tool.`
 }
 
 // /jev-tool: list, show, clear, and the two switches.
@@ -1783,8 +1783,9 @@ export const register: Register = (on, options) => {
     // A tool Jev picked is suggested only if its file is still there.
     const pickedTools: { tool: SavedTool; probability: number }[] = []
     let staleTools = 0
-    for (const p of pickTools(result.tools, toolOptions, config.tools.threshold, config.tools.hints)) {
-      if (await $.fs.exists(p.tool.path)) pickedTools.push(p)
+    const best = bestTool(result.toolMatch, result.tools, toolOptions, config.tools.threshold)
+    if (best) {
+      if (await $.fs.exists(best.tool.path)) pickedTools.push(best)
       else staleTools++
     }
     if (pickedTools.length > 0) {
@@ -1808,7 +1809,7 @@ export const register: Register = (on, options) => {
       sent_chars: sent.length,
       index_size: skills.length,
       skill_routing: config.skillRouting,
-      tools: toolOptions.length > 0 ? { options: toolOptions.length, none: result.tools?.none ?? null, picked: pickedTools.map(p => ({ name: p.tool.name, scope: p.tool.scope, probability: p.probability })), stale: staleTools } : undefined,
+      tools: toolOptions.length > 0 ? { options: toolOptions.length, match: result.toolMatch ?? null, picked: pickedTools.map(p => ({ name: p.tool.name, scope: p.tool.scope, probability: p.probability })), stale: staleTools } : undefined,
       mode: config.mode,
       outcome: result.outcome,
       reason: result.reason,

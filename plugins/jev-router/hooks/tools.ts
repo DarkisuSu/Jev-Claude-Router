@@ -3,7 +3,7 @@
 // library lives in $.store (register.ts); only descriptions are kept, never a
 // file's content, and a saved tool is only ever suggested, never run.
 import { scrubText } from './awareness'
-import { MAX_CHOICE_OPTIONS, NO_TOOL } from './questions'
+import { MAX_CHOICE_OPTIONS } from './questions'
 
 export type Scope = 'project' | 'global'
 // Who put the tool in the list. An assistant's tools are a cache of its own
@@ -98,7 +98,7 @@ export const prepareTool = (input: unknown, secrets: readonly string[] = []): { 
   if (!record(input)) return { status: 'invalid_request', reason: 'Expected an object.' }
   try {
     const name = typeof input.name === 'string' ? input.name : ''
-    if (!NAME.test(name) || name.toLowerCase() === NO_TOOL) throw new Error('name must be a short identifier (letters, digits, - and _) and not "none".')
+    if (!NAME.test(name)) throw new Error('name must be a short identifier (letters, digits, - and _).')
     const scope = input.scope === undefined ? 'project' : input.scope
     if (scope !== 'project' && scope !== 'global') throw new Error('scope must be project or global.')
     const path = typeof input.path === 'string' ? input.path.trim() : ''
@@ -157,15 +157,15 @@ export const readLibrary = (raw: unknown, scope: Scope): SavedTool[] => {
 
 // ---- picking
 
-// Tools whose probability reaches the threshold, likeliest first, up to `max`.
-export const pickTools = (probabilities: Readonly<Record<string, number>> | undefined, known: readonly SavedTool[], threshold: number, max: number): { tool: SavedTool; probability: number }[] => {
-  if (!probabilities) return []
+// The saved tool Jev judged the best fit, when it judged (at `threshold` or more)
+// that one of them does what the request asks at all.
+export const bestTool = (match: number | undefined, probabilities: Readonly<Record<string, number>> | undefined, known: readonly SavedTool[], threshold: number): { tool: SavedTool; probability: number } | undefined => {
+  if (match === undefined || match < threshold || !probabilities) return undefined
   const byName = new Map(known.map(t => [t.name, t]))
-  return Object.entries(probabilities)
-    .filter(([name, p]) => name !== NO_TOOL && byName.has(name) && Number.isFinite(p) && p >= threshold)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, Math.max(1, Math.floor(max)))
-    .map(([name, p]) => ({ tool: byName.get(name)!, probability: Math.round(p * 1000) / 1000 }))
+  const [name, p] = Object.entries(probabilities)
+    .filter(([n, v]) => byName.has(n) && Number.isFinite(v))
+    .sort((a, b) => b[1] - a[1])[0] ?? []
+  return name === undefined || p === undefined ? undefined : { tool: byName.get(name)!, probability: Math.round(p * 1000) / 1000 }
 }
 
 // One line of saved text, safe inside the hint: no markup, bounded.

@@ -14,9 +14,9 @@ Release installation: `/plugin install jev-router --marketplace DarkisuSu/Jev-Cl
 ## Skill routing
 
 1. **Index.** The router reads its skill list from `$.command.list()`, keeping only user and plugin entries. It adds SKILL.md text from the project's `.claude/skills` folders, `~/.claude/skills` (synced skills included) and installed plugins. Run `/jev-index` to see the list.
-2. **rank_wide.** One Choice question ranks every skill. Three Noul gates ask whether the prompt needs a skill at all. If the gate's mean is below `gate_threshold` (0.3), the result is no match.
+2. **rank_wide.** One Choice question ranks every skill. Two separate yes/no (Noul) questions open the gate, each answered over the skills listed in the state (`available_skills`): does the request itself name a skill, command, tool or workflow (`names_a_workflow`), and does a listed skill do what it asks (`catalog_has_match`). The larger answer is the gate score; if it is below `gate_threshold` (0.5) the result is no match. Asking about the installed skills, rather than about the kind of task, is what lets a request like "plan this with speckit" through.
 3. **rerank.** The top `shortlist_size` skills (3, the cookbook's value) are judged again, each with its own `fits::<name>` Noul.
-4. **Select.** The fits threshold (`fits_threshold`, 0.3) is the confidence cut-off: every shortlisted skill that reaches it is recommended, best first, with no count limit. Both 0.3 defaults come from the cookbook; TypeSafe publishes no general default and advises tuning on your own data.
+4. **Select.** The fits threshold (`fits_threshold`, 0.3) is the confidence cut-off: every shortlisted skill that reaches it is recommended, best first, with no count limit. TypeSafe publishes no general default and advises tuning thresholds on your own data; the gate's 0.5 is the point where yes and no are equally likely.
 
 **No match, error, timeout or no key:** the prompt goes on with nothing added, so Claude's own skill behaviour stands.
 
@@ -65,7 +65,7 @@ Claude often writes a script for a piece of work (a converter, a check, a report
 
 **Whose tool it is.** Every entry records its origin. What an assistant saved with `save_tool` is a cache of its own work: it is marked "saved by an assistant" in the hint, can be cleared in bulk, and its script file is deleted with it. What you register with `/jev-tool add <name> <absolute path> [project|global] <what it does>` is yours: marked "registered by the user", not judged by Jev, not counted against `tool_max`, left alone by every bulk clear and eviction, and its file is never deleted by the plugin. An assistant's save never replaces a tool of yours with the same name, and is declined if the list is full of your own tools. Only `/jev-tool clear <name>` removes one of yours, and that removes the entry, not the file.
 
-**Choosing.** With `tool_routing` on and at least one saved tool, request 1 also asks one Choice, `tool_which`, among the project's tools, the global ones (a project tool hides a global one of the same name) and `none`. Each tool Jev puts at least `tool_threshold` (0.5) probability on, up to `tool_hints` (3), is suggested beside the prompt, if its file still exists:
+**Choosing.** With `tool_routing` on and at least one saved tool, request 1 also asks, as for skills, a yes/no question over the saved tools listed in the state (`tool_has_match`: does one of them do what the request asks) and a Choice, `tool_which`, among the project's tools and the global ones (a project tool hides a global one of the same name). If the yes/no answer reaches `tool_threshold` (0.5), the best-fitting tool is suggested beside the prompt, if its file still exists:
 
 ```
 <tool_relevance source="jev-router (TypeSafe Jev)">
@@ -245,7 +245,7 @@ The settings page holds the settings people change:
 | Tool save threshold (`tool_save_threshold`) | 0.5 |
 | Automatic decisions (`decision_routing`) | on |
 | Load mode | hint |
-| Gate threshold | 0.3 |
+| Gate threshold | 0.5 |
 | Fits threshold | 0.3 |
 | Model routing | dry-run |
 | Fallback model | session |
@@ -267,7 +267,6 @@ The rest are kept off the page, saved in `$.store`, and changed with `/jev-model
 | `auto_probe` | true | true / false |
 | `probe_wait_ms` | 20000 | 0 to 120000 ms the first message waits for a probe |
 | `tool_max` | 50 | 1 to 200 saved tools per scope |
-| `tool_hints` | 3 | 1 to 5 tools suggested per request |
 | `decision_confidence_threshold` | 0.6 | 0.5 to 1 |
 | `jev_context_chars` | 12000 | 0 to 20000 |
 | `jev_context_messages` | 16 | 1 to 40 |
