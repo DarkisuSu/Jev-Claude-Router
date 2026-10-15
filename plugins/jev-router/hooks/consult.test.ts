@@ -268,10 +268,36 @@ describe('every skill and saved tool during the work goes through Jev', () => {
     await consult($)
     expect(refused(await bash($, 'python ' + FILE + ' in.csv out.json'))).toBe(false)
   })
-  test('a subagent is not held to it', { options: OPTS }, async ($, on) => {
+  test('a subagent is held to the same, with its own allowed set', { options: OPTS }, async ($, on) => {
     mock.clock(on); memoryStore(on); beneathTools(on)
     world(on, jevFor())
-    expect(refused(await skill($, 'speckit-plan', { agentId: 'sub-1' }))).toBe(false)
+    expect(refused(await skill($, 'speckit-plan', { agentId: 'sub-1' }))).toBe(true)
+    await consult($)
+    // What the main agent was given does not carry to the subagent.
+    expect(refused(await skill($, 'speckit-specify', { agentId: 'sub-1' }))).toBe(true)
+    const own = outcome(await $.tool.call({ tool: CONSULT_TOOL, task: 'the subagent task', agentId: 'sub-1' } as never))
+    expect(own.status).toBe('picked')
+    expect(refused(await skill($, 'speckit-specify', { agentId: 'sub-1' }))).toBe(false)
+    expect(refused(await skill($, 'speckit-plan', { agentId: 'sub-1' }))).toBe(true)
+  })
+  test('a subagent\'s consult leaves the status line and the main agent\'s picks alone', { options: OPTS }, async ($, on) => {
+    mock.clock(on); memoryStore(on); beneathTools(on)
+    const w = world(on, jevFor())
+    const before = w.status.length
+    await $.tool.call({ tool: CONSULT_TOOL, task: 'the subagent task', agentId: 'sub-1' } as never)
+    expect(w.status.length).toBe(before)
+    expect(refused(await skill($, 'speckit-specify'))).toBe(true)
+  })
+  test('with Jev unreachable Claude is handed the lists and descriptions to choose from', { options: OPTS }, async ($, on) => {
+    mock.clock(on); memoryStore(on); beneathTools(on)
+    const w = world(on, jevFor({ fail: true }))
+    await saved($, w)
+    const out = outcome(await consult($))
+    expect(out.status).toBe('unavailable')
+    expect(out.fallback.note).toContain('choose from these yourself')
+    expect(out.fallback.skills.find((k: { name: string }) => k.name === 'speckit-specify')).toMatchObject({ description: expect.any(String) })
+    expect(out.fallback.tools).toMatchObject([{ name: 'csv_to_json', description: GOOD.description, usage: GOOD.usage, path: FILE }])
+    expect(w.status.at(-1)).toContain('Claude chooses')
   })
   test('prehint refuses nothing', { options: { ...OPTS, selection_mode: 'prehint' } }, async ($, on) => {
     mock.clock(on); memoryStore(on); beneathTools(on)

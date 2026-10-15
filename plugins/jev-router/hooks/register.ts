@@ -75,6 +75,9 @@ const PROBE_TEXT = 'Reply with exactly: OK'
 const MAX_REPROBES = 2
 // How often a waiting message looks at whether the probes have finished.
 const PROBE_POLL_MS = 250
+// What Claude is handed to choose from when Jev cannot be reached.
+const FALLBACK_SKILLS = 80
+const FALLBACK_DESCRIPTION = 200
 // A model id no account has: the probe's check that a failed request can be
 // sent again on the session's own model.
 const PROBE_BAD_MODEL = 'jev-router-probe-no-such-model'
@@ -228,10 +231,13 @@ const S: {
   hintedTools: SavedTool[]
   // The model line of the latest message, for the status line a consult completes.
   chosenModel: string
-  // Consult mode: the skills and saved tools Jev has returned for the work of this
-  // message; any other is refused until a consult returns it. `open` when Jev
-  // could not be reached, so nothing is refused.
-  approved: { skills: Set<string>; tools: Set<string>; open: boolean }
+  // Consult mode: the skills and saved tools Jev has returned for the work of
+  // each agent ('main', or a subagent's id); any other is refused until a
+  // consult returns it. The main agent's start again with each user message.
+  approvals: Map<string, { skills: Set<string>; tools: Set<string> }>
+  // Jev could not be reached on the latest consult: nothing is refused, and
+  // Claude was handed the lists to choose from itself, until a consult works.
+  consultDown: boolean
   writes: Promise<void>
   roundSeq: number
   available: Available
@@ -278,7 +284,8 @@ const S: {
   probeQueue: [],
   hintedTools: [],
   chosenModel: '',
-  approved: { skills: new Set(), tools: new Set(), open: false },
+  approvals: new Map(),
+  consultDown: false,
   probeAgents: new Set(),
   autoProbed: new Set(),
   turnProbes: new Map(),
@@ -295,7 +302,19 @@ const S: {
 
 // Conversation facts never go to $.store. session.end fires on clear/resume;
 // the id check also covers hosts that replace a conversation without reloading.
+const approvalFor = (agentId?: string) => {
+  const key = agentId ?? 'main'
+  let approval = S.approvals.get(key)
+  if (!approval) {
+    approval = { skills: new Set(), tools: new Set() }
+    S.approvals.set(key, approval)
+  }
+  return approval
+}
+
 function clearConversation(why: string, sessionId?: string) {
+  S.approvals.clear()
+  S.consultDown = false
   S.cache = resetCache(S.cache, why, sessionId)
   S.nextDecision = undefined
   S.pending = undefined
@@ -1224,7 +1243,7 @@ async function dataCommand($: EngineInterface, raw: string): Promise<string> {
 
 // consult: Claude asks Jev which skill or saved tool fits, before starting.
 // Jev reads the task and the recent conversation; nothing is loaded or run.
-async function consultCall($: EngineInterface, input: unknown): Promise<ConsultResult> {
+async function consultCall($: EngineInterface, input: unknown, agentId?: string): Promise<ConsultResult> {
   const config = S.config
   if (!config.enabled || !config.key) return { status: 'unavailable', reason: !config.key ? 'no-key' : 'disabled' }
   const prepared = prepareConsult(input)
@@ -1249,23 +1268,36 @@ async function consultCall($: EngineInterface, input: unknown): Promise<ConsultR
     () => $.clock.now(),
   )
   if (result.outcome === 'error') {
-    // Jev could not be reached: nothing is refused until it can be.
-    S.approved.open = true
-    await consultNotice($, 'skill unavailable · tool unavailable')
-    await log($, { type: 'consult', outcome: 'error', reason: result.reason, task_chars: sent.length, jev_calls: result.calls, total_ms: (await $.clock.now()) - started })
-    return { status: 'unavailable', reason: result.reason ?? 'jev failure' }
+    // Jev could not be reached: nothing is refused until it can be, and Claude
+    // is handed the lists and descriptions to choose from itself, as it would
+    // be without the router.
+    S.consultDown = true
+    if (agentId === undefined) await consultNotice($, 'skill unavailable · tool unavailable (Claude chooses)')
+    await log($, { type: 'consult', outcome: 'error', reason: result.reason, agent: agentId !== undefined, task_chars: sent.length, jev_calls: result.calls, total_ms: (await $.clock.now()) - started })
+    return {
+      status: 'unavailable',
+      reason: result.reason ?? 'jev failure',
+      fallback: {
+        note: 'Jev could not be reached, so nothing is refused: choose from these yourself.',
+        skills: skills.slice(0, FALLBACK_SKILLS).map(k => ({ name: k.name, description: k.description.slice(0, FALLBACK_DESCRIPTION) })),
+        tools: toolOptions.map(t => ({ name: t.name, scope: t.scope, description: t.description, usage: t.usage, path: t.path })),
+      },
+    }
   }
   const pickedTools: { tool: SavedTool; probability: number }[] = []
   for (const p of pickTools(result.tools, toolOptions, config.tools.threshold, config.tools.hints)) {
     if (await $.fs.exists(p.tool.path)) pickedTools.push(p)
   }
-  // The same bookkeeping as a hint: a picked skill's load and a picked tool's use are noted.
-  S.pending = result.selected.length > 0 ? { id: `consult-${started.toString(36)}`, selected: result.selected.map(s => s.name), delivery: Object.fromEntries(result.selected.map(s => [s.name, 'hint' as const])), loaded: new Set() } : undefined
-  S.hintedTools = pickedTools.map(p => p.tool)
-  for (const s of result.selected) S.approved.skills.add(s.name)
-  for (const p of pickedTools) S.approved.tools.add(p.tool.name)
+  S.consultDown = false
+  const approval = approvalFor(agentId)
+  for (const s of result.selected) approval.skills.add(s.name)
+  for (const p of pickedTools) approval.tools.add(p.tool.name)
+  // The same bookkeeping as a hint (the main agent's): a picked skill's load and a picked tool's use are noted.
+  if (agentId === undefined) S.pending = result.selected.length > 0 ? { id: `consult-${started.toString(36)}`, selected: result.selected.map(s => s.name), delivery: Object.fromEntries(result.selected.map(s => [s.name, 'hint' as const])), loaded: new Set() } : undefined
+  if (agentId === undefined) S.hintedTools = pickedTools.map(p => p.tool)
   await log($, {
     type: 'consult',
+    agent: agentId !== undefined,
     outcome: result.selected.length + pickedTools.length > 0 ? 'picked' : 'nothing_fits',
     reason: result.reason,
     task_chars: sent.length,
@@ -1278,7 +1310,7 @@ async function consultCall($: EngineInterface, input: unknown): Promise<ConsultR
     jev_calls: result.calls,
     total_ms: (await $.clock.now()) - started,
   })
-  await consultNotice($, `skill ${result.selected.map(s => s.name).join(', ') || 'none'} · tool ${pickedTools.map(p => p.tool.name).join(', ') || 'none'}`)
+  if (agentId === undefined) await consultNotice($, `skill ${result.selected.map(s => s.name).join(', ') || 'none'} · tool ${pickedTools.map(p => p.tool.name).join(', ') || 'none'}`)
   if (result.selected.length + pickedTools.length === 0) return { status: 'nothing_fits', reason: result.reason }
   return {
     status: 'picked',
@@ -1587,16 +1619,16 @@ export const register: Register = (on, options) => {
   }).catch(() => ({ result: saveText({ status: 'unavailable', reason: 'tool-hook-failed' }) }))
 
   on('tool.call', { tool: 'mcp__jev-router__consult' }, async ($, e) => {
-    return { result: consultText(await consultCall($, { task: e.task })) }
+    return { result: consultText(await consultCall($, { task: e.task }, (e as { agentId?: string }).agentId)) }
   }).catch(() => ({ result: consultText({ status: 'unavailable', reason: 'consult-hook-failed' }) }))
 
   // A saved tool the shell ran counts as a use.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     // Consult mode: a saved tool Jev has not returned for this work is not run.
-    if ((e as { agentId?: string }).agentId === undefined && config.enabled && config.key && config.selectionMode === 'consult' && config.tools.routing && !S.approved.open) {
+    if (config.enabled && config.key && config.selectionMode === 'consult' && config.tools.routing && !S.consultDown) {
       const library = await loadTools($)
       const command = String((e as { command?: unknown }).command ?? '')
-      const unapproved = mergeTools(library.project, library.global).find(t => usesTool(command, t) && !S.approved.tools.has(t.name))
+      const unapproved = mergeTools(library.project, library.global).find(t => usesTool(command, t) && !approvalFor((e as { agentId?: string }).agentId).tools.has(t.name))
       if (unapproved) {
         await log($, { type: 'consult', outcome: 'denied', kind: 'tool', name: unapproved.name })
         return { deny: `jev-router: Jev has not returned the saved tool ${unapproved.name} for this work. Call ${CONSULT_TOOL} with a one-sentence task, then run only a saved tool it returns.` }
@@ -1670,7 +1702,7 @@ export const register: Register = (on, options) => {
       await finishRound($, 'superseded')
       S.nextDecision = undefined
       S.hintedTools = []
-      S.approved = { skills: new Set(), tools: new Set(), open: false }
+      S.approvals.delete('main')
     }
 
     const skip = (reason: string) => log($, { type: 'round', ...base, outcome: 'skipped', reason }).then(() => next(e))
@@ -2088,8 +2120,8 @@ export const register: Register = (on, options) => {
   // in every surface, so it is the dependable signal.
   on('tool.call', { tool: 'Skill' }, async ($, e, next) => {
     // Consult mode: a skill Jev has not returned for this work is refused, and
-    // the refusal says what to do. Subagents are not held to it.
-    if ((e as { agentId?: string }).agentId === undefined && config.enabled && config.key && config.selectionMode === 'consult' && config.skillRouting && !S.approved.open && ![...S.approved.skills].some(name => sameSkill(name, String(e.skill)))) {
+    // the refusal says what to do. A subagent is held to the same.
+    if (config.enabled && config.key && config.selectionMode === 'consult' && config.skillRouting && !S.consultDown && ![...approvalFor((e as { agentId?: string }).agentId).skills].some(name => sameSkill(name, String(e.skill)))) {
       await log($, { type: 'consult', outcome: 'denied', kind: 'skill', name: String(e.skill) })
       return { deny: `jev-router: Jev has not returned the skill ${String(e.skill)} for this work. Call ${CONSULT_TOOL} with a one-sentence task, then use only a skill it returns.` }
     }

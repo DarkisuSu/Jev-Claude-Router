@@ -23,12 +23,14 @@ export const consultInstructions = (routesModel: boolean): string =>
   [
     `Jev router: ${routesModel ? 'the model and effort of each turn, and ' : ''}the choice of a skill or a saved tool ${routesModel ? 'are' : 'is'} delegated to Jev (TypeSafe), not decided by you.`,
     `At the start of every user message, before anything else, call ${CONSULT_TOOL} with a one-sentence task. Call it again whenever the work changes and a different skill or saved tool might serve, including one that a skill's own instructions tell you to load. Jev answers with the skills and saved tools that fit, with probabilities, or says none does. Choose from what Jev returns: use the ones that fit the work, ignore the rest, and load a picked skill with the Skill tool or read a picked tool's file before running it. A skill or saved tool that Jev has not returned is refused. Normal permission checks apply.`,
-    'Use only a skill or a saved tool that Jev returned; do not pick one on your own. If Jev is unavailable or picks nothing, carry on with your own judgment; do not ask again about the same work.',
+    'Use only a skill or a saved tool that Jev returned; do not pick one on your own. If Jev picks nothing, carry on with your own judgment. If Jev is unavailable, its answer lists the skills and saved tools for you to choose from yourself. When you start a subagent, tell it to call the consult tool before it uses any skill or saved tool.',
   ].join('\n')
 
 export type ConsultResult = {
   status: 'picked' | 'nothing_fits' | 'unavailable' | 'invalid_request'
   reason?: string
+  // With Jev unreachable: what Claude may choose from itself.
+  fallback?: { note: string; skills: { name: string; description: string }[]; tools: { name: string; scope: string; description: string; usage: string; path: string }[] }
   skills?: { name: string; fits: number; probability: number }[]
   tools?: { name: string; scope: string; probability: number; usage: string; path: string; origin: 'user' | 'assistant' }[]
 }
