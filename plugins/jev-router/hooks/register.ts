@@ -44,7 +44,7 @@ import { cacheAdvice, cacheEvidence, observeUsage, resetCache, withContext, type
 import { SHARED, parseSetting, settingValue, sharedConfig } from './settings'
 import { JevError, route, type RouteResult, type Send } from './router'
 import { EMPTY_ATTEMPT, STATE_CHAR_BUDGET, STATE_RESERVE, recentContext, routingFacts, scrubText, type AttemptFacts } from './awareness'
-import { applyHide, hiddenNames, overridesOf } from './hide'
+import { DESC_CAP, applyOpt, capOf, hiddenNames, overridesOf } from './hide'
 import { DECISION_TOOL, DECISION_DESCRIPTION, DECISION_SCHEMA, decisionText, prepareDecision, evaluateDecision } from './decisions'
 import {
   assembleIndex,
@@ -115,8 +115,8 @@ const num = (v: unknown, fallback: number, min: number, max: number) =>
 export const readConfig = (o: PluginOptions): Config => ({
   key: typeof o.typesafe_api_key === 'string' ? o.typesafe_api_key.trim() : '',
   enabled: o.enabled !== false,
-  skillRouting: o.skill_routing !== false,
-  shortlist: 3,
+  skillRouting: o.skill_routing === true,
+  shortlist: 6,
   gateThreshold: num(o.gate_threshold, 0.5, 0, 1),
   fitsThreshold: num(o.fits_threshold, 0.5, 0, 1),
   resetRequested: o.reset_to_defaults === true,
@@ -190,11 +190,13 @@ const HINT_DESCRIPTION_CHARS = 1024
 const hintLine = (text: string, max: number) => text.replace(/[<>`]/g, "'").replace(/\s+/g, ' ').trim().slice(0, max)
 
 // The skills Jev kept for this request, with their descriptions: the result of
-// the screening, not the whole list. Claude still chooses among them.
+// the screening, not the whole list. Claude still chooses among them. Every
+// hint carries the descriptions again: it is what Claude chooses from for this
+// request, whatever an earlier hint said.
 export const hintBlock = (skills: readonly { name: string; description: string }[]) =>
   [
     '<skill_relevance source="jev-router (TypeSafe Jev)">',
-    `Jev screened the installed skills against this request and kept ${skills.length === 1 ? 'the skill' : 'the skills'} below${skills.length === 1 ? '' : ', most relevant first'}. The names and descriptions here are the result of that screening, not the full list. Choose among them: load the one that fits with the Skill tool before acting, or ignore them if none fits.`,
+    'Jev screened the installed skills against this request and kept the ones below, most relevant first; the names and descriptions here are the result of that screening, not the full list. Choose among them: load the one that fits with the Skill tool before acting, or ignore them if none fits.',
     ...skills.map(s => `- ${s.name}: ${hintLine(s.description, HINT_DESCRIPTION_CHARS)}`),
     '</skill_relevance>',
   ].join('\n')
@@ -477,12 +479,14 @@ async function scanFolder($: EngineInterface, root: string, prefix: string, into
   }
 }
 
-// /jev-skills: send only the names of the project's skills in Claude's skill
-// listing, not their descriptions (they cost tokens on every request), or list
-// them in full again. The skills stay loadable by name. Written to the
-// project's local settings file, apart from Git.
+// /jev-skills opt: trim Claude's skill listing, the part of every request that
+// lists the skills. Claude Code cuts each listed description to
+// `skillListingMaxDescChars` (every skill, built-in and synced ones too), and a
+// project skill can be cut to its name; Jev's hint then carries the full
+// description of the few skills it kept. Written to the project's local
+// settings file, apart from Git.
 // The project's skills and its local settings file: where the skillOverrides
-// live. Undefined when the session has no folder.
+// and the cap live. Undefined when the session has no folder.
 async function projectSkillState($: EngineInterface) {
   let cwd: string
   try {
@@ -505,8 +509,20 @@ async function projectSkillState($: EngineInterface) {
   return { cwd, file, names: [...found.keys()], settings, readable }
 }
 
-// Every session, while some project skill still sends its full description:
-// say so once, with the command that fixes it. Nothing is written.
+// The description cap in the user's own settings, when it has one.
+async function userCap($: EngineInterface): Promise<number | undefined> {
+  try {
+    const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
+    if (!home) return undefined
+    return capOf(JSON.parse(await $.fs.read(`${norm(home)}/.claude/settings.json`)))
+  } catch {
+    return undefined
+  }
+}
+
+// Every session, while the listing is not trimmed (no description cap, or a
+// project skill still in full): say so once, with the command that fixes it.
+// Nothing is written.
 async function skillTrimHint($: EngineInterface) {
   if (!S.config.enabled || !S.config.skillTrimHint) return
   try {
@@ -514,15 +530,17 @@ async function skillTrimHint($: EngineInterface) {
     if (!state?.readable) return
     const overrides = overridesOf(state.settings)
     const full = state.names.filter(n => overrides[n] === undefined)
-    if (full.length === 0) {
+    const capped = capOf(state.settings) !== undefined || (await userCap($)) !== undefined
+    if (full.length === 0 && capped) {
       S.trimHint = ''
       return
     }
-    const text = `jev-router: ${full.length} project skill${full.length === 1 ? ' sends its' : 's send their'} full description to Claude on every request. /jev-skills hide all sends names only and saves those tokens (nothing is written until you run it).`
+    const parts = [...(capped ? [] : ['descriptions uncapped']), ...(full.length > 0 ? [`${full.length} project skill${full.length === 1 ? '' : 's'} in full`] : [])]
+    const text = `jev-router: skill listing not trimmed (${parts.join(', ')}). /jev-skills opt trims it; nothing is written until you run it.`
     // A toast is gone in seconds: the short form stays on the status line.
     // Only remembered here: the status line is written by the later updates, not
     // while the plugin is still loading.
-    S.trimHint = `${full.length} skill${full.length === 1 ? '' : 's'} not trimmed · /jev-skills hide all`
+    S.trimHint = 'listing not trimmed · /jev-skills opt'
     $.ui.toast(text)
     if (S.config.chatNotice) await chatNotice($, text)
   } catch {
@@ -531,48 +549,40 @@ async function skillTrimHint($: EngineInterface) {
 }
 
 async function skillsCommand($: EngineInterface, raw: string): Promise<string> {
-  const args = raw.trim().split(/\s+/).filter(Boolean)
-  const verb = args[0] ?? 'status'
-  const usage = 'jev-router: /jev-skills [status | hide <name ... | all> | show <name ... | all>]'
-  if (!['status', 'hide', 'show'].includes(verb)) return usage
+  const [verb = 'status', arg] = raw.trim().split(/\s+/).filter(Boolean)
+  if (!(verb === 'status' || (verb === 'opt' && (arg === undefined || arg === 'off')))) return 'jev-router: /jev-skills [opt | opt off]'
   const state = await projectSkillState($)
   if (!state) return 'jev-router: this session has no project folder.'
-  const { cwd, file, names, settings, readable } = state
-  const hidden = new Set(hiddenNames(settings))
+  const { file, names, settings, readable } = state
+  const inherited = await userCap($)
 
   if (verb === 'status') {
-    const lines = [
-      `jev-router project skills (${names.length}) in ${cwd}/.claude/skills and above. Description left out of Claude's listing: ${names.filter(n => hidden.has(n)).length}.`,
-      ...names.map(n => `  ${n}${hidden.has(n) ? ' [name only]' : ''}`),
-      'Name only: /jev-skills hide <name ... | all>. Full listing again: /jev-skills show <name ... | all>. Takes effect in a new session; the skills stay loadable by name. Only skills set here are touched.',
-      'Plugin skills (typesafe, anthropic-skills) and Claude Code\'s own are not affected by this setting.',
-    ]
-    if (names.length === 0) lines.splice(1, 0, '  (none found)')
-    return lines.join('\n')
+    const hidden = new Set(hiddenNames(settings))
+    const cap = capOf(settings) ?? inherited
+    return `jev-router: descriptions ${cap === undefined ? 'full' : `cut to ${cap} chars`} · ${names.filter(n => hidden.has(n)).length}/${names.length} project skills name only. /jev-skills opt trims, opt off undoes.`
   }
 
-  const wanted = args.slice(1)
-  if (wanted.length === 0) return usage
-  const targets = wanted.includes('all') ? names : wanted.filter(n => names.includes(n))
-  const unknown = wanted.filter(n => n !== 'all' && !names.includes(n))
   if (!readable) return `jev-router: ${file} exists but is not valid JSON, so it was left alone. Fix it first.`
-  if (targets.length === 0) return `jev-router: no such project skill: ${unknown.join(', ')}. See /jev-skills.`
-  const next = applyHide(settings, targets, verb as 'hide' | 'show')
-  if (next.changed.length > 0) {
+  const on = arg === undefined
+  const next = applyOpt(settings, names, on, inherited)
+  const changed = next.cap || next.changed.length > 0
+  if (changed) {
     try {
       await $.fs.write(file, `${JSON.stringify(next.settings, null, 2)}\n`)
     } catch (err) {
       return `jev-router: could not write ${file}: ${err instanceof Error ? err.message.slice(0, 120) : 'error'}`
     }
   }
-  await log($, { type: 'skills', action: verb, changed: next.changed.length })
+  await log($, { type: 'skills', action: on ? 'opt' : 'opt-off', cap: next.cap, changed: next.changed.length })
+  const did = [
+    ...(next.cap ? [on ? `descriptions cut to ${DESC_CAP} chars` : 'descriptions full'] : []),
+    ...(next.changed.length > 0 ? [`${next.changed.length} project skill${next.changed.length === 1 ? '' : 's'} ${on ? 'name only' : 'in full'}`] : []),
+  ]
   return [
-    next.changed.length > 0 ? `jev-router: ${verb === 'hide' ? 'name only in Claude\'s listing' : 'listed in full again'}: ${next.changed.join(', ')}. Written to ${file}; it takes effect in a new session.` : `jev-router: nothing to ${verb}.`,
-    ...(next.skipped.length > 0 ? [`Left alone (set to another value in that file): ${next.skipped.join(', ')}.`] : []),
-    ...(unknown.length > 0 ? [`No such project skill: ${unknown.join(', ')}.`] : []),
+    changed ? `jev-router: ${on ? 'trimmed' : 'restored'}: ${did.join(', ')}. New session to apply.` : `jev-router: nothing to ${on ? 'trim' : 'restore'}.`,
+    ...(next.skipped.length > 0 ? [`Left alone (set to another value): ${next.skipped.join(', ')}.`] : []),
   ].join('\n')
 }
-
 async function scanFiles($: EngineInterface) {
   const files = new Map<string, Found>()
 
@@ -1562,6 +1572,27 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'jev-tool' }, async ($, e) => ({ text: await toolCommand($, e.args) }))
   on('command.run', { command: 'jev-skills' }, async ($, e) => ({ text: await skillsCommand($, e.args) }))
+
+  // Diagnostic: which prompt.* events the host raises for this plugin. Only the
+  // event name goes to the log (write_log on). Where an organization manages
+  // Claude Code, the host may pass these over a plugin a person installed; the
+  // lines never appearing is how that shows.
+  on('prompt.compose', async ($, e, next) => {
+    await log($, { type: 'event', event: 'prompt.compose' })
+    return next(e)
+  }).catch(($, e, next) => next(e))
+  on('prompt.attachment', async ($, e, next) => {
+    await log($, { type: 'event', event: 'prompt.attachment', attachment: String((e as { type?: unknown }).type) })
+    return next(e)
+  }).catch(($, e, next) => next(e))
+  on('prompt.section', async ($, e, next) => {
+    await log($, { type: 'event', event: 'prompt.section' })
+    return next(e)
+  }).catch(($, e, next) => next(e))
+  on('prompt.context', async ($, e, next) => {
+    await log($, { type: 'event', event: 'prompt.context' })
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   on('tool.call', { tool: 'mcp__jev-router__decide' }, async ($, e) => {
     const input = { decision_owner: e.decision_owner, authority: e.authority, state: e.state, questions: e.questions }

@@ -41,7 +41,7 @@ const MANIFEST = JSON.stringify({
     typesafe_api_key: { type: 'string' },
     model_threshold: { type: 'number', default: 0.5 },
     fits_threshold: { type: 'number', default: 0.5 },
-    skill_routing: { type: 'boolean', default: true },
+    skill_routing: { type: 'boolean', default: false },
     fallback_model: { type: 'string', default: 'session' },
     reset_to_defaults: { type: 'boolean', default: false },
     ...Object.fromEntries(Object.entries(SHARED).filter(([, spec]) => spec.where === 'page').map(([key, spec]) => [key, { default: spec.default }])),

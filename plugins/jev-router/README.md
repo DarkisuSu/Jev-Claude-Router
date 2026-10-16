@@ -15,14 +15,14 @@ Release installation: `/plugin install jev-router --marketplace DarkisuSu/Jev-Cl
 
 1. **Index.** The router reads its skill list from `$.command.list()`, keeping only user and plugin entries. It adds each skill's full description from its SKILL.md in the project's `.claude/skills` folders, `~/.claude/skills` (synced skills included) and installed plugins. Run `/jev-index` to see the list.
 2. **rank_wide.** One Choice question ranks every skill. Two separate yes/no (Noul) questions open the gate, each answered over the skills listed in the state (`available_skills`): does the request itself name a skill, command, tool or workflow (`names_a_workflow`), and does a listed skill do what it asks (`catalog_has_match`). The larger answer is the gate score; if it is below `gate_threshold` (0.5) the result is no match. Asking about the installed skills, rather than about the kind of task, is what lets a request like "plan this with speckit" through.
-3. **rerank.** The top `shortlist_size` skills (3, the cookbook's value) are judged again, each with its own `fits::<name>` Noul. Jev reads only each skill's name and full description, never the SKILL.md body; saved tools are described to Jev the same way, by name and description.
+3. **rerank.** The top `shortlist_size` skills (6) are judged again, each with its own `fits::<name>` Noul. Jev reads only each skill's name and full description, never the SKILL.md body; saved tools are described to Jev the same way, by name and description.
 4. **Select.** The fits threshold (`fits_threshold`, 0.5) is the confidence cut-off: every shortlisted skill that reaches it is recommended, best first, with no count limit. TypeSafe publishes no general default and advises tuning thresholds on your own data; the gate's 0.5 is the point where yes and no are equally likely.
 
 **No match, error, timeout or no key:** the prompt goes on with nothing added, so Claude's own skill behaviour stands.
 
 **Switching it off.** `Skill selection` on the settings page (or `/jev-model skills on|off`) is separate from model routing. Off, the skill index is not built, no skill is ranked, gated or suggested, and the prompt-time request to Jev carries the model questions alone (the round's reason is `skill-routing-off`). With model routing off as well, there is no prompt-time Jev call; the decision tool can still make its own calls. `Router enabled` stops all three features.
 
-**What Claude is given.** Jev only filters; reading a skill is left to Claude Code. The prompt gets a `<skill_relevance>` block with the name and description of each skill Jev kept, and says they are the result of that screening, not the full list. This is what Claude Code's own skill listing shows, narrowed to the skills Jev chose; Claude still decides, and loads the one that fits natively with the Skill tool.
+**What Claude is given.** Jev only filters; reading a skill is left to Claude Code. The prompt gets a `<skill_relevance>` block with the name and description of each skill Jev kept, and says they are the result of that screening, not the full list. This is what Claude Code's own skill listing shows, narrowed to the skills Jev chose; Claude still decides, and loads the one that fits natively with the Skill tool. Every hint carries the descriptions again, since it is what Claude chooses from for that request.
 
 **Load tracking:** a `tool.call` hook on the Skill tool records real native loads, with `skill.prompt` as a second source. Each turn's log entry marks every routed skill `native-loaded` or `not-loaded`.
 
@@ -32,23 +32,21 @@ Jev picks while the prompt is sent (the `prompt.submit` hook), and the picks rid
 
 The status line names what was chosen, for example `jev: model sonnet/high · skill speckit-plan · tool csv_to_json` (always all three: a skill or tool not chosen reads `none`, a switched-off one `off`; the same line is added to the conversation as a notice the model does not read, unless `chat_notice` is off).
 
-**`/jev-skills`** cuts a project's skills down to their names in the listing Claude Code sends Claude (the descriptions are most of its tokens): `hide all` (or names) sets `skillOverrides` to `name-only` for them in the project's `.claude/settings.local.json` (the folder the session started in; the file is yours, usually kept out of Git), `show` takes back only what it set. Jev still ranks them by their full SKILL.md description, read from the files; Claude sees a name until Jev picks one, and then the name and description of that one in the hint. The skills stay loadable by name, and Claude Code loads the full text when Claude asks for it. It changes no other key, leaves a skill you set to another value alone, and writes nothing if the file is not valid JSON. The change takes effect in a new session. It covers project skills only. **Reminder:** at every session start, while some project skill still sends its full description (no override for it in that file), the router says so with a toast and a notice in the conversation, naming `/jev-skills hide all`; it writes nothing itself. Turn it off with `skill_trim_hint`.
+**`/jev-skills opt`** trims Claude's skill listing, the part of every request that lists the skills and is most of what skills cost in tokens. It writes two things to the project's `.claude/settings.local.json` (the file is yours, usually kept out of Git): `skillListingMaxDescChars` set to 100, so Claude Code cuts every listed description (project, plugin, synced and built-in skills alike) to 100 characters, and `skillOverrides` `name-only` for the project's own skills. Claude then sees every skill by name and a short description, and the hint gives the full description of the few Jev kept. The skills stay loadable by name, and Claude Code loads the full text when Claude asks for it. `/jev-skills opt off` takes back only what it wrote; a cap you set yourself (in that file or in your user settings) and a skill you set to another value are left alone, and nothing is written if the file is not valid JSON. It takes effect in a new session; `/jev-skills` alone shows the state. **Reminder:** at every session start, while the listing is not trimmed (no cap, or a project skill in full), the router says so with a toast and a notice in the conversation, naming `/jev-skills opt`; it writes nothing itself. Turn it off with `skill_trim_hint`.
 
 **Asking Jev during the work.** The plugin ships the skill `jev-router:ask-jev` and the `decide` tool. The skill tells Claude it **may** hand a narrow decision within its own authority to Jev (a Choice, a yes/no probability or a Score), including whether a step belongs to the task the user asked for. It is a suggestion: no tool is required before another and no call is refused. The skill costs one short entry in Claude's skill listing; Jev does not index it.
 
-## What cannot be hidden from Claude
+## What the listing still costs
 
-Claude Code adds a skill listing (each skill's name and description) to every request, and that listing is most of what skills cost in tokens. The router can shorten it **only for the project's own skills** (`/jev-skills`, above). It cannot shorten or remove it for:
+Claude Code adds a skill listing (each skill's name and description) to every request, and that listing is most of what skills cost in tokens. The router cannot remove it, only shorten it, and only through Claude Code's own settings, which `/jev-skills opt` writes:
 
-- **Plugin skills** (for example `typesafe:typesafe-ai`): Claude Code's `skillOverrides` setting does not apply to a plugin's skills.
-- **Skills synced from your account** (the `anthropic-skills:` ones) and **Claude Code's own built-in skills** (`loop`, `schedule`, `code-review` and the like): they are part of what Claude Code puts in the listing itself.
+- `skillListingMaxDescChars` cuts each listed description, for every skill (project, plugin, synced and built-in). This is where most of the tokens are.
+- `skillOverrides` `name-only` drops a project skill's description altogether. It covers personal and project skills, not plugin ones (turn those off with `/plugin`).
+- No setting empties the listing: Claude Code always carries every skill's name. The settings that hide a skill from Claude (`disable-model-invocation`, `skillOverrides` set to `off` or `user-invocable-only`) also stop Claude loading it, which would defeat Jev picking one for Claude to use.
 
-This is because Claude Code's design leaves no way around it, not a choice of the router:
+A mod hook could rewrite the listing instead, but the `prompt.*` events (`prompt.attachment`, `prompt.section`, `prompt.context`, `prompt.compose`) were never raised in the VS Code extension or in `claude -p`, on a Team account; in the interactive terminal they were. The Claude Code docs say mod hooks run on all of these surfaces, so this is a discrepancy to report, not a rule. The router registers only a log-only diagnostic on them (the event name, with `write_log` on), so a Claude Code that raises them shows up in the log; what the router adds goes beside the user's message (`prompt.submit`), which does run everywhere.
 
-- No setting empties the listing: Claude Code states that it always carries every skill's name, and its budget settings only cut descriptions.
-- The settings that hide a skill from Claude (`disable-model-invocation`, `skillOverrides` set to `off` or `user-invocable-only`) also stop Claude loading it, which would defeat Jev picking a skill for Claude to use.
-- A mod hook could rewrite or drop the listing (`prompt.attachment` with `{ text: null }`), but the hook was never called for it, in the VS Code extension or in a headless `claude -p` run: the log recorded no attachment of any kind, while the listing still reached Claude. `claude plugin validate` says why: where an organization manages Claude Code, the `prompt.*` events pass over the plugins a person installs. So the router neither tries to drop the listing nor registers any `prompt.*` hook; what it adds goes beside the user's message (`prompt.submit`), which does run.
-- A mod cannot change Claude Code's settings for you, and the router does not write them behind your back: `/jev-skills` writes only when you run it.
+A mod cannot change Claude Code's settings for you, and the router does not write them behind your back: `/jev-skills opt` writes only when you run it.
 
 For these skills Jev's pick is added beside the listing, not instead of it, and Claude can still load any of them by name.
 
@@ -235,8 +233,8 @@ The settings page holds the settings people change:
 | Router enabled | on |
 | Write log | off |
 | Reset all settings to defaults | off |
-| Skill selection | on |
-| Tool selection (`tool_routing`) | on |
+| Skill selection (experimental) | off |
+| Tool selection (`tool_routing`, experimental) | off |
 | Let Claude save tools (`tool_save`) | on |
 | Tool selection threshold (`tool_threshold`) | 0.5 |
 | Tool save threshold (`tool_save_threshold`) | 0.5 |
@@ -269,7 +267,7 @@ The rest are kept off the page, saved in `$.store`, and changed with `/jev-model
 | `jev_model` | jev-latest | 1 to 64 characters |
 | `timeout_ms` | 9000 | 1000 to 9000 |
 | `max_prompt_chars` | 4000 | 200 to 20000 |
-| `shortlist_size` | 3 | 1 to 12 |
+| `shortlist_size` | 6 | 1 to 12 |
 
 Each setting has one home and is read from it alone. `/jev-model unset <name>` restores one default; `/jev-model defaults` (or the reset switch) restores both homes and keeps the API key. All defaults are starting points, not measured optimums.
 
@@ -288,8 +286,8 @@ Each setting has one home and is read from it alone. `/jev-model unset <name>` r
 | `/jev-model probe` | Learns each family's full id and effort support through tiny subagents |
 | `/jev-model reset` | Clears learned ids and this session's failed models |
 | `/jev-model models` | Shows the models this Claude Code lists and which are routable |
-| `/jev-skills` | Lists the project's skills and which are sent to Claude as a name only |
-| `/jev-skills hide <name ... \| all>` / `show <name ... \| all>` | Sends only the names of project skills in Claude's listing, or lists them in full again (see Skill text) |
+| `/jev-skills` | Shows whether the skill listing is trimmed: the description cap, and how many project skills are sent as a name only |
+| `/jev-skills opt` / `opt off` | Trims Claude's skill listing (descriptions cut to 100 characters, project skills to a name), or takes back only what it wrote |
 | `/jev-log` | Shows the last 20 log lines; `/jev-log clear [today|all]` empties today's or every dated log file |
 | `/jev-data` | Shows local Jev data; clear logs, learned routing data, saved-tool indexes, or all of those |
 | `/jev-index` | Shows the skill index |
@@ -340,6 +338,13 @@ claude plugin test plugins/jev-router
 ```
 
 Tests answer Jev with the test's own `http.fetch` hook and model requests with the test's own `turn.step` hook. They use a placeholder key and make no network or model calls. They verify routing behaviour, not Jev's accuracy or real task success.
+
+### Measuring the filtering against the real Jev
+
+The unit tests cannot say whether the filtering is any good. Two checks that can, run after any change to the gate or fit questions, the thresholds or what is sent to Jev:
+
+- **Wording.** Call the `decide` tool with a state shaped like the router's (`request`, `recent_context`, `available_skills` as `name: description` lines) and the candidate yes/no questions side by side. Compare a clear match, a request that asks for several things in turn, an unrelated request and a greeting.
+- **End to end.** For each labelled request run `claude -p "<request>" --tools "" --max-turns 1 --no-session-persistence` from the project folder (`--tools ""` switches every tool off, so nothing a request names can run), then read the new `round` lines with `"origin":"sdk"` from the log (`write_log` on): `gate`, `shortlist`, `fits`, `selected`. Use single-phase requests, other skills, a multi-phase request, one that names the skill, and several that need none. Report recall (was every needed skill handed over), noise (how many beyond them), false hits (a request that needs none but got one), and tokens (a hint block is about 330 characters plus one `- name: description` line per skill, against the skill listing without the router).
 
 ### Interface limits
 

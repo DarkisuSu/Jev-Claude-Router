@@ -34,9 +34,9 @@
     },
     "skill_routing": {
       "type": "boolean",
-      "title": "Skill · Skill selection",
-      "description": "Suggest local skills for each prompt. Off: no skill is suggested and the skill index is not built; model routing and automatic decisions are unaffected. The Router enabled switch stops all three.\nDefault: on",
-      "default": true
+      "title": "Skill · Skill selection (experimental)",
+      "description": "Experimental. Jev screens the skills for each prompt and the prompt carries the ones it kept; Claude Code still lists every skill itself, so this adds a hint rather than replacing the list. Off: no skill is suggested and the skill index is not built; model routing and automatic decisions are unaffected. The Router enabled switch stops all three.\nDefault: off",
+      "default": false
     },
     "decision_routing": {
       "type": "boolean",
@@ -62,8 +62,8 @@
     },
     "skill_trim_hint": {
       "type": "boolean",
-      "title": "Skill · Remind me to trim project skills",
-      "description": "At each session start, say so when a project skill still sends its full description to Claude on every request, and name the command that sends names only (/jev-skills hide all). Nothing is written until you run it.\\nDefault: on",
+      "title": "Skill · Remind me to trim the skill listing",
+      "description": "At each session start, say so while the skill listing is not trimmed (no description cap, or a project skill still in full), and name the command that trims it (/jev-skills opt). Nothing is written until you run it.\\nDefault: on",
       "default": true
     },
     "chat_notice": {
@@ -74,9 +74,9 @@
     },
     "tool_routing": {
       "type": "boolean",
-      "title": "Tool · Tool selection",
-      "description": "Jev suggests a saved tool (a script an assistant wrote for earlier work) when a request looks like work it already did. Claude decides whether to run it; nothing runs by itself. Off: saved tools are neither asked about nor suggested.\nDefault: on",
-      "default": true
+      "title": "Tool · Tool selection (experimental)",
+      "description": "Experimental. Jev suggests a saved tool (a script an assistant wrote for earlier work) when a request looks like work it already did. Claude decides whether to run it; nothing runs by itself. Off: saved tools are neither asked about nor suggested.\nDefault: off",
+      "default": false
     },
     "tool_save": {
       "type": "boolean",

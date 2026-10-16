@@ -157,7 +157,7 @@ describe('tool question in the routing request', () => {
 
 // ---- through the engine
 
-const OPTS = { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'off', skill_routing: false }
+const OPTS = { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'off', skill_routing: false, tool_routing: true }
 type Jev = { tool?: Record<string, number>; reusable?: number | 'fail' }
 const jevFor = (j: Jev) => (q: Record<string, unknown>) => {
   if ('reusable' in q) return j.reusable === 'fail' ? { status: 500, body: {} } : { status: 200, body: { model: 'jev-test', answers: { reusable: { type: 'noul', noul: j.reusable ?? 0.9 } } } }

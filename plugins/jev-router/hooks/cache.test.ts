@@ -122,7 +122,7 @@ describe('cache evidence and estimator', () => {
 
 // These tests give Jev's rating of one tier alone, so the tier clamp is off.
 const learned = { caps: { version: '9.9.9', families: { opus: { id: OPUS, ok: true, effort: true, at: '' }, sonnet: { id: SONNET, ok: true, effort: true, at: '' }, haiku: { id: HAIKU, ok: true, effort: true, at: '' } }, retryOk: true }, advanced: { tier_monotonic: false } }
-const options = { typesafe_api_key: FAKE_KEY, model_routing: 'on', write_log: true }
+const options = { typesafe_api_key: FAKE_KEY, skill_routing: true, tool_routing: true, model_routing: 'on', write_log: true }
 // Jev judges only the chosen tier at the chosen effort (0 low, 1 medium,
 // 2 high) able to do the work; `fail` makes Jev answer with an error.
 type Choice = { model: string; score: number; fail?: boolean }

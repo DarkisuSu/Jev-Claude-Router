@@ -10,7 +10,7 @@ const rounds = (w: World) => logLines(w).filter(r => r.type === 'round')
 const isWide = (q: Record<string, unknown>) => 'catalog_has_match' in q
 
 describe('skill router', () => {
-  test('match: a skill whose fits clears the 0.5 default rides beside the prompt as a hint', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
+  test('match: a skill whose fits clears the 0.5 default rides beside the prompt as a hint', { options: { typesafe_api_key: FAKE_KEY, skill_routing: true, tool_routing: true, write_log: true } }, async ($, on) => {
     mock.clock(on)
     const w = world(on, q => (isWide(q) ? { status: 200, body: rankWide(0.9, 'speckit-specify') } : { status: 200, body: rerank(q, { 'speckit-specify': 0.85 }) }))
 
@@ -37,7 +37,7 @@ describe('skill router', () => {
     expect(raw.includes('VIP lobby')).toBe(false)
   })
 
-  test('no count cap: every skill at or above the threshold is hinted, best first', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
+  test('no count cap: every skill at or above the threshold is hinted, best first', { options: { typesafe_api_key: FAKE_KEY, skill_routing: true, tool_routing: true, write_log: true } }, async ($, on) => {
     mock.clock(on)
     const w = world(on, q =>
       isWide(q)
@@ -53,7 +53,7 @@ describe('skill router', () => {
     expect(hint.indexOf('- speckit-specify: ')).toBeGreaterThan(hint.indexOf('- speckit-plan: '))
   })
 
-  test('the fits threshold comes from settings', { options: { typesafe_api_key: FAKE_KEY, write_log: true, fits_threshold: 0.85 } }, async ($, on) => {
+  test('the fits threshold comes from settings', { options: { typesafe_api_key: FAKE_KEY, skill_routing: true, tool_routing: true, write_log: true, fits_threshold: 0.85 } }, async ($, on) => {
     mock.clock(on)
     const w = world(on, q => (isWide(q) ? { status: 200, body: rankWide(0.9, 'speckit-specify') } : { status: 200, body: rerank(q, { 'speckit-specify': 0.7 }) }))
 
@@ -63,7 +63,7 @@ describe('skill router', () => {
     expect(rounds(w)[0]?.reason).toBe('fits')
   })
 
-  test('the gate threshold comes from settings', { options: { typesafe_api_key: FAKE_KEY, write_log: true, gate_threshold: 0.95 } }, async ($, on) => {
+  test('the gate threshold comes from settings', { options: { typesafe_api_key: FAKE_KEY, skill_routing: true, tool_routing: true, write_log: true, gate_threshold: 0.95 } }, async ($, on) => {
     mock.clock(on)
     const w = world(on, q => (isWide(q) ? { status: 200, body: rankWide(0.9, 'speckit-specify') } : { status: 200, body: rerank(q, { 'speckit-specify': 0.7 }) }))
 
@@ -74,7 +74,7 @@ describe('skill router', () => {
     expect(rounds(w)[0]?.reason).toBe('gate')
   })
 
-  test('no match: a low gate leaves the prompt untouched after one call', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
+  test('no match: a low gate leaves the prompt untouched after one call', { options: { typesafe_api_key: FAKE_KEY, skill_routing: true, tool_routing: true, write_log: true } }, async ($, on) => {
     mock.clock(on)
     const w = world(on, () => ({ status: 200, body: rankWide(0.1, 'speckit-plan') }))
 
@@ -85,7 +85,7 @@ describe('skill router', () => {
     expect(rounds(w)[0]?.reason).toBe('gate')
   })
 
-  test('API error: a 500 is logged and the prompt goes on untouched', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
+  test('API error: a 500 is logged and the prompt goes on untouched', { options: { typesafe_api_key: FAKE_KEY, skill_routing: true, tool_routing: true, write_log: true } }, async ($, on) => {
     mock.clock(on)
     const w = world(on, () => ({ status: 500, body: { error: 'boom' } }))
 
@@ -97,7 +97,7 @@ describe('skill router', () => {
     expect(rounds(w)[0]?.reason).toBe('jev http 500')
   })
 
-  test('API error: a hung request times out and the prompt goes on untouched', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
+  test('API error: a hung request times out and the prompt goes on untouched', { options: { typesafe_api_key: FAKE_KEY, skill_routing: true, tool_routing: true, write_log: true } }, async ($, on) => {
     const clock = mock.clock(on)
     mock.store(on, { advanced: { timeout_ms: 2000 } })
     const w = world(on, () => 'hang')
@@ -121,7 +121,7 @@ describe('skill router', () => {
     expect(rounds(w)[0]?.reason).toBe('no-key')
   })
 
-  test('logging is off by default: nothing is written', { options: { typesafe_api_key: FAKE_KEY } }, async ($, on) => {
+  test('logging is off by default: nothing is written', { options: { typesafe_api_key: FAKE_KEY, skill_routing: true, tool_routing: true } }, async ($, on) => {
     mock.clock(on)
     const w = world(on, q => (isWide(q) ? { status: 200, body: rankWide(0.9, 'speckit-specify') } : { status: 200, body: rerank(q, { 'speckit-specify': 0.85 }) }))
 
@@ -132,7 +132,7 @@ describe('skill router', () => {
     expect(w.written.size).toBe(0)
   })
 
-  test('a Skill tool call marks the routed skill native-loaded', { options: { typesafe_api_key: FAKE_KEY, write_log: true } }, async ($, on) => {
+  test('a Skill tool call marks the routed skill native-loaded', { options: { typesafe_api_key: FAKE_KEY, skill_routing: true, tool_routing: true, write_log: true } }, async ($, on) => {
     mock.clock(on)
     const w = world(on, q => (isWide(q) ? { status: 200, body: rankWide(0.9, 'speckit-specify') } : { status: 200, body: rerank(q, { 'speckit-specify': 0.85 }) }))
     on('tool.call', () => ({ result: { success: true, commandName: 'speckit-specify' } as never }))
