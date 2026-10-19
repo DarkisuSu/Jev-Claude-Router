@@ -1323,6 +1323,10 @@ async function dataCommand($: EngineInterface, raw: string): Promise<string> {
   return 'jev-router: /jev-data [status | clear logs [today|all] | clear learned | clear tools [project|global|all] [--keep-files] | clear all [--keep-files]]'
 }
 
+// Why the router is doing nothing, or undefined while it works.
+const inactiveReason = (config: { enabled: boolean; key: string }): string | undefined =>
+  !config.enabled ? 'not working: router disabled in settings' : !config.key ? 'not working: no TypeSafe API key (set it in /plugin)' : undefined
+
 // The status line, with the skill-trim reminder after it while one is due.
 function setStatus($: EngineInterface, line: string) {
   try {
@@ -1534,6 +1538,8 @@ export const register: Register = (on, options) => {
     await loadCaps($)
     await loadHidden($)
     await skillTrimHint($)
+    const idle = inactiveReason(config)
+    if (idle) setStatus($, idle)
     if (config.enabled && config.key && config.tools.save) {
       await $.tool.register({ name: 'save_tool', description: SAVE_DESCRIPTION, inputSchema: SAVE_SCHEMA, isDeferred: false })
     }
@@ -1658,6 +1664,9 @@ export const register: Register = (on, options) => {
     }
 
     const skip = (reason: string) => log($, { type: 'round', ...base, outcome: 'skipped', reason }).then(() => next(e))
+    // Not working at all: the status line says why, on every message.
+    const idle = inactiveReason(config)
+    if (idle) setStatus($, idle)
     if (!config.enabled) return skip('disabled')
     if (!config.key) return skip('no-key')
     if (!isRoutedOrigin(origin)) return skip('origin')
@@ -1770,10 +1779,13 @@ export const register: Register = (on, options) => {
     }
     // What Jev chose, in one line: the model, then any skill or tool.
     if (!midTurn) {
-      // Always all three, so "nothing chosen" shows as plainly as a choice.
-      const skillText = !config.skillRouting ? 'off' : result.selected.length > 0 ? result.selected.map(s => s.name).join(', ') : 'none'
-      const toolText = !config.tools.routing ? 'off' : pickedTools.length > 0 ? pickedTools.map(p => p.tool.name).join(', ') : 'none'
-      const summary = `model ${chosen || 'off'} · skill ${skillText} · tool ${toolText}`
+      // The model always; skill and tool selection are experimental and off by
+      // default, so they appear only while on. A Jev error shows as one.
+      const parts = [`model ${chosen || 'off'}`]
+      if (config.skillRouting) parts.push(`skill ${result.selected.length > 0 ? result.selected.map(s => s.name).join(', ') : 'none'}`)
+      if (config.tools.routing) parts.push(`tool ${pickedTools.length > 0 ? pickedTools.map(p => p.tool.name).join(', ') : 'none'}`)
+      if (result.outcome === 'error') parts.push(`Jev error: ${result.reason ?? 'unknown'}`)
+      const summary = parts.join(' · ')
       setStatus($, summary)
       if (config.chatNotice) await chatNotice($, `jev-router: ${summary}`)
     }

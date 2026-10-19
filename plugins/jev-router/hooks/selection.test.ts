@@ -42,7 +42,7 @@ describe('prehint mode says what Jev chose', () => {
     const w = world(on, jevFor({ tool: { none: 0.1, csv_to_json: 0.9 } }))
     await saved($, w)
     await begin($)
-    expect(w.status.at(-1)).toBe('jev: model off · skill off · tool csv_to_json')
+    expect(w.status.at(-1)).toBe('jev: model off · tool csv_to_json')
   })
 })
 
@@ -55,7 +55,7 @@ describe('a line in the conversation', () => {
     await saved($, w)
     await begin($)
     const rows = session.appended().map(r => r.message as { type: string; content: { text: string }[] })
-    expect(rows.at(-1)).toMatchObject({ type: 'system', content: [{ text: 'jev-router: model off · skill off · tool csv_to_json' }] })
+    expect(rows.at(-1)).toMatchObject({ type: 'system', content: [{ text: 'jev-router: model off · tool csv_to_json' }] })
   })
   test('chat_notice off adds nothing', { options: { ...TOOLS, chat_notice: false } }, async ($, on) => {
     mock.clock(on); memoryStore(on)
@@ -72,6 +72,27 @@ describe('a line in the conversation', () => {
     await begin($)
     expect(w.status.at(-1)).toBe('jev: model off · skill none · tool none')
     expect(session.appended().at(-1)?.message).toMatchObject({ content: [{ text: 'jev-router: model off · skill none · tool none' }] })
+  })
+})
+
+describe('the status line says why nothing works', () => {
+  test('with no API key it says so, on every message', { options: { typesafe_api_key: '', write_log: true, model_routing: 'on' } }, async ($, on) => {
+    mock.clock(on); memoryStore(on)
+    const w = world(on, jevFor())
+    await begin($)
+    expect(w.status.at(-1)).toContain('not working: no TypeSafe API key')
+  })
+  test('with the router disabled it says so', { options: { typesafe_api_key: FAKE_KEY, enabled: false, write_log: true } }, async ($, on) => {
+    mock.clock(on); memoryStore(on)
+    const w = world(on, jevFor())
+    await begin($)
+    expect(w.status.at(-1)).toContain('not working: router disabled')
+  })
+  test('while it works the status does not mention it, and the experimental selections stay out while off', { options: { typesafe_api_key: FAKE_KEY, write_log: true, model_routing: 'off' } }, async ($, on) => {
+    mock.clock(on); memoryStore(on)
+    const w = world(on, jevFor())
+    await begin($)
+    expect(w.status.at(-1)).toBe('jev: model off')
   })
 })
 
