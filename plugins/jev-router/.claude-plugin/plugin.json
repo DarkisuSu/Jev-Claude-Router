@@ -59,7 +59,7 @@
     "escalation": {
       "type": "string",
       "title": "Model · Escalate when work goes wrong (experimental)",
-      "description": "Experimental. Within one turn, when tool calls keep failing (Bash, PowerShell, Edit or Write failing in a row, the same operation failing again, or the same file edited back and forth), raise the effort, then the model, for the steps that follow. off: nothing. dry-run: only log what it would do. on: switch. Needs model routing on to switch.\nDefault: dry-run",
+      "description": "Experimental. Within one turn, when tool calls keep failing (Bash, PowerShell, Edit or Write failing in a row, or the same operation failing again), raise the effort, then the model, for the steps that follow. off: nothing. dry-run: only log what it would do. on: switch. Needs model routing on to switch.\nDefault: dry-run",
       "options": [
         "off",
         "dry-run",

@@ -53,7 +53,6 @@ export const SHARED: Record<string, Spec> = {
   jev_context_messages: { where: 'store', kind: 'number', default: 16, min: 1, max: 40, integer: true, what: 'Most recent user/assistant messages those excerpts come from' },
   escalate_failures: { where: 'store', kind: 'number', default: 3, min: 1, max: 20, integer: true, what: 'Escalation: failed Bash, PowerShell, Edit or Write calls in a row that count as trouble' },
   escalate_repeats: { where: 'store', kind: 'number', default: 3, min: 2, max: 20, integer: true, what: 'Escalation: times the same command or file operation fails in a turn before it counts as trouble' },
-  escalate_edits: { where: 'store', kind: 'number', default: 8, min: 2, max: 30, integer: true, what: 'Escalation: successful edits of the same file in a turn before it counts as trouble (the work is going back and forth)' },
   escalate_max: { where: 'store', kind: 'number', default: 2, min: 1, max: 5, integer: true, what: 'Escalation: most rungs one turn climbs; after an escalation the next one needs new trouble' },
 }
 
@@ -102,7 +101,6 @@ export const sharedConfig = (page: Record<string, unknown>, store: Record<string
       limits: {
         failures: v('escalate_failures') as number,
         repeats: v('escalate_repeats') as number,
-        edits: v('escalate_edits') as number,
         max: v('escalate_max') as number,
       },
     },

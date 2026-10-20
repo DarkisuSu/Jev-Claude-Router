@@ -1994,7 +1994,7 @@ export const register: Register = (on, options) => {
       ? { ...final, changed: final.model !== e.model || final.effort !== e.effort }
       : { ...final, model: e.model, effort: e.effort, changed: false }
 
-    // Trouble in this turn (calls failing, a file edited back and forth): the
+    // Trouble in this turn (calls failing in a row or again and again): the
     // pair goes up a rung for this step and the ones after it. Switching needs
     // model routing on; otherwise it only records what it would do.
     const escalating = config.escalation.mode !== 'off' && config.routing !== 'off'

@@ -3,7 +3,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import { afterEscalation, emptySignals, nextRung, noteCall, raise, triggered, type Call, type Signals, type Thresholds } from './escalate'
 import type { Caps } from './model'
 
-const LIMITS: Thresholds = { failures: 3, repeats: 3, edits: 4, max: 2 }
+const LIMITS: Thresholds = { failures: 3, repeats: 3, max: 2 }
 const bash = (command: string, isError = false): Call => ({ tool: 'Bash', input: { command }, isError, denied: false })
 const edit = (file_path: string, isError = false): Call => ({ tool: 'Edit', input: { file_path }, isError, denied: false })
 const feed = (calls: Call[]): Signals => calls.reduce(noteCall, emptySignals())
@@ -20,9 +20,8 @@ describe('signs of trouble', () => {
     expect(triggered(feed(calls), LIMITS)).toBe('repeat-failure')
   })
 
-  test('a file edited back and forth triggers; other files do not add up', () => {
-    expect(triggered(feed([edit('a.cs'), edit('b.cs'), edit('a.cs'), edit('b.cs'), edit('c.cs')]), LIMITS)).toBeUndefined()
-    expect(triggered(feed([edit('a.cs'), edit('a.cs'), edit('a.cs'), edit('a.cs')]), LIMITS)).toBe('edits')
+  test('editing a file again and again is development, not trouble', () => {
+    expect(triggered(feed(Array.from({ length: 30 }, () => edit('a.cs'))), LIMITS)).toBeUndefined()
   })
 
   test('searching is not trouble: a failed Read or Grep counts for nothing', () => {
