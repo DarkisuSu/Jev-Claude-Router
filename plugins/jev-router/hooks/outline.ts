@@ -75,38 +75,66 @@ export const outlineOf = (path: string, text: string, secrets: readonly string[]
   }
 }
 
+// The files whose code is outlined: the languages the signatures above are read
+// from. A markdown heading or a JSON key is not a declaration.
+const CODE_FILE = /\.(?:cs|ts|tsx|js|jsx|mjs|cjs|py|java|kt)$/i
+
+// A file is read in pieces (an offset and a limit), so one read rarely holds
+// its declarations whole. The pieces of a file are put together here: the
+// signatures of every piece read, in the order they stand in the file, then
+// those of text that was written. Only a piece from the top of the file, or a
+// whole write, can say what the file is for.
+type Part = { offset: number; text: string; fromTop: boolean; written: boolean }
+
+const partOf = (tool: string, input: Record<string, unknown>, text: string | undefined): Part | undefined => {
+  if (text === undefined) return undefined
+  if (tool === 'Read') {
+    const offset = typeof input.offset === 'number' && input.offset > 0 ? input.offset : 1
+    return { offset, text: unnumbered(text), fromTop: offset <= 1, written: false }
+  }
+  if (tool === 'Write') return { offset: 0, text, fromTop: true, written: true }
+  return { offset: Number.MAX_SAFE_INTEGER, text, fromTop: false, written: true }
+}
+
 const size = (o: Outline) => o.path.length + (o.purpose?.length ?? 0) + o.symbols.reduce((n, s) => n + s.length, 0)
 
-// Outlines of the files lately read or edited, newest first. A file read is
-// outlined from what was read of it; one only edited, from the text written.
-// Files that look like secrets are left out; files with nothing to show too.
+// Outlines of the files lately read or edited, newest first. Files that look
+// like secrets or are not code are left out; so are files with nothing to show.
 export const codeOutline = (messages: readonly MessageLike[] | undefined, secrets: readonly string[] = []): Outline[] => {
   const uses = usesOf(messages ?? []).slice(-RECENT_CALLS).reverse()
-  // Per file, a read or a whole write shows more of it than an edit's fragment
-  // does, so it is preferred; a fragment that shows nothing hides nothing.
-  const found = new Map<string, { at: number; fragment: boolean; outline: Outline }>()
+  const files = new Map<string, { at: number; parts: Part[] }>()
   uses.forEach((use, at) => {
     if (use.isError === true) return
     const tool = typeof use.tool === 'string' ? use.tool : ''
     const input = (typeof use.input === 'object' && use.input !== null ? use.input : {}) as Record<string, unknown>
     const path = pathText(input.file_path ?? input.notebook_path)
-    if (!path || path === '[sensitive path]') return
-    let text: string | undefined
-    if (tool === 'Read' && typeof use.text === 'string') text = unnumbered(use.text)
-    else if (tool === 'Edit' && typeof input.new_string === 'string') text = input.new_string
-    else if (tool === 'Write' && typeof input.content === 'string') text = input.content
-    if (text === undefined) return
-    const outline = outlineOf(path, text, secrets)
-    if (outline.symbols.length === 0 && !outline.purpose) return
-    const fragment = tool === 'Edit'
-    const have = found.get(path)
-    if (!have) found.set(path, { at, fragment, outline })
-    else if (have.fragment && !fragment) found.set(path, { at: have.at, fragment, outline })
+    if (!path || path === '[sensitive path]' || !CODE_FILE.test(path)) return
+    const text = tool === 'Read' && typeof use.text === 'string' ? use.text : tool === 'Edit' && typeof input.new_string === 'string' ? input.new_string : tool === 'Write' && typeof input.content === 'string' ? input.content : undefined
+    const part = partOf(tool, input, text)
+    if (!part) return
+    const have = files.get(path)
+    if (have) have.parts.push(part)
+    else files.set(path, { at, parts: [part] })
   })
-  const outlines = [...found.values()].sort((a, b) => a.at - b.at).map(f => f.outline)
+
+  const outlines: { at: number; outline: Outline }[] = []
+  for (const [path, { at, parts }] of files) {
+    const symbols: string[] = []
+    let purpose: string | undefined
+    let seen = 0
+    for (const part of [...parts].sort((a, b) => a.offset - b.offset)) {
+      const piece = outlineOf(path, part.text, secrets)
+      if (part.fromTop && !purpose) purpose = piece.purpose
+      if (!part.written) seen += piece.lines_seen
+      for (const symbol of piece.symbols) if (symbols.length < OUTLINE_SYMBOLS && !symbols.includes(symbol)) symbols.push(symbol)
+    }
+    if (symbols.length === 0 && !purpose) continue
+    outlines.push({ at, outline: { path, lines_seen: seen || parts.reduce((n, p) => n + p.text.split('\n').length, 0), ...(purpose ? { purpose } : {}), symbols } })
+  }
+
   const picked: Outline[] = []
   let left = OUTLINE_CHARS
-  for (const outline of outlines) {
+  for (const { outline } of outlines.sort((a, b) => a.at - b.at)) {
     if (picked.length >= OUTLINE_FILES) break
     const need = size(outline)
     if (need > left) continue

@@ -98,7 +98,7 @@ describe('the outlines of the files the conversation touched', () => {
       assistant(use('Edit', { file_path: 'b.cs', old_string: 'x', new_string: 'public void Second() {}' }), use('Edit', { file_path: 'b.cs', old_string: 'y', new_string: 'public void Third() {}' })),
     ] as never)
     expect(outlines.map(o => o.path)).toEqual(['b.cs', 'a.cs'])
-    expect(outlines[0]!.symbols).toEqual(['public void Third()'])
+    expect(outlines[0]!.symbols).toEqual(['public void Third()', 'public void Second()'])
   })
 
   test('a secret file, a failed call and a file with nothing to show are left out', () => {
@@ -205,13 +205,41 @@ describe('an edit that shows nothing does not hide the file read before it', () 
     expect(outlines[0]!.symbols[0]).toBe('public sealed class LoginService : IDisposable')
   })
 
-  test('a read is preferred over an edit fragment of the same file, the file keeping its place by recency', () => {
+  test('what an edit wrote is added after what was read, the file keeping its place by recency', () => {
     const outlines = codeOutline([
       assistant(use('Read', { file_path: 'a.cs' }, 'public class Whole { }\npublic void One() {}')),
       assistant(use('Read', { file_path: 'b.cs' }, 'public class Other { }')),
       assistant(use('Edit', { file_path: 'a.cs', old_string: 'x', new_string: 'public void Added() {}' })),
     ] as never)
     expect(outlines.map(o => o.path)).toEqual(['a.cs', 'b.cs'])
-    expect(outlines[0]!.symbols).toEqual(['public class Whole', 'public void One()'])
+    expect(outlines[0]!.symbols).toEqual(['public class Whole', 'public void One()', 'public void Added()'])
+  })
+})
+
+describe('a file read in pieces', () => {
+  const piece = (offset: number, lines: string[]) => use('Read', { file_path: 'Assets/Big.cs', offset, limit: lines.length }, lines.map((l, i) => `${offset + i}\t${l}`).join('\n'))
+
+  test('the signatures of every piece are put together in the order they stand in the file', () => {
+    const [o] = codeOutline([
+      assistant(piece(40, ['    public void Middle()', '    {', '    }'])),
+      assistant(piece(1, ['// Holds the big thing.', 'public class Big', '{', '    public void First() {}'])),
+      assistant(piece(90, ['    public void Last() {}'])),
+    ] as never)
+    expect(o!.symbols).toEqual(['public class Big', 'public void First()', 'public void Middle()', 'public void Last()'])
+    expect(o!.purpose).toBe('Holds the big thing.')
+  })
+
+  test('a piece from the middle of a file cannot say what the file is for', () => {
+    const outlines = codeOutline([assistant(piece(60, ['// do the next step', 'public void Step() {}']))] as never)
+    expect(outlines[0]!.purpose).toBeUndefined()
+    expect(outlines[0]!.symbols).toEqual(['public void Step()'])
+  })
+
+  test('markdown and data files are not outlined: a heading is not a declaration', () => {
+    const outlines = codeOutline([
+      assistant(use('Read', { file_path: 'README.md' }, '# Title\n\nSome words.\nclass Names in prose')),
+      assistant(use('Read', { file_path: 'plugin.json' }, '{ "class Thing": 1 }')),
+    ] as never)
+    expect(outlines).toEqual([])
   })
 })
