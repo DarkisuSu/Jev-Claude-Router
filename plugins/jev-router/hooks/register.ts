@@ -45,6 +45,9 @@ import { SHARED, parseSetting, settingValue, sharedConfig } from './settings'
 import { JevError, route, type RouteResult, type Send } from './router'
 import { EMPTY_ATTEMPT, STATE_CHAR_BUDGET, STATE_RESERVE, recentContext, routingFacts, scrubText, type AttemptFacts } from './awareness'
 import { DESC_CAP, applyOpt, capOf, hiddenNames, overridesOf } from './hide'
+import { codeOutline } from './outline'
+import { codeSnippets, composeWork, parseGit, workFacts, type GitFacts } from './work'
+import { afterEscalation, emptySignals, nextRung, noteCall, raise, triggered, type Pair, type Signals } from './escalate'
 import { DECISION_TOOL, DECISION_DESCRIPTION, DECISION_SCHEMA, decisionText, prepareDecision, evaluateDecision } from './decisions'
 import {
   assembleIndex,
@@ -65,6 +68,7 @@ const CAPS_KEY = 'caps'
 const OUTPUTS_KEY = 'outputs'
 // Main requests per turn of the latest turns (numbers only), across sessions.
 const TURNLEN_KEY = 'turnlen'
+const CODE_NOTICE_KEY = 'code-notice-shown'
 const KEPT_TURN_LENGTHS = 20
 const PROBE_TEXT = 'Reply with exactly: OK'
 // A routed request that fails goes back to the probe at most this many times
@@ -84,7 +88,10 @@ type Config = {
   enabled: boolean
   skillRouting: boolean
   decisionRouting: boolean
+  escalation: ReturnType<typeof sharedConfig>['escalation']
   chatNotice: boolean
+  workSummary: boolean
+  codeSnippets: boolean
   skillTrimHint: boolean
   probeWaitMs: number
   tools: ReturnType<typeof sharedConfig>['tools']
@@ -260,6 +267,10 @@ const S: {
   stepCounts: Map<string, number>
   executed?: { model: string; effort?: string | number }
   attempts: Map<string, AttemptFacts>
+  // Signs of trouble in each running turn, and the pair an escalation set as
+  // the floor for its later steps.
+  signals: Map<string, Signals>
+  floors: Map<string, Pair>
   lastAttempt?: AttemptFacts
   mainTurn?: string
 } = {
@@ -288,6 +299,8 @@ const S: {
   turnLengths: [],
   stepCounts: new Map(),
   attempts: new Map(),
+  signals: new Map(),
+  floors: new Map(),
 }
 
 // Conversation facts never go to $.store. session.end fires on clear/resume;
@@ -306,6 +319,8 @@ function clearConversation(why: string, sessionId?: string) {
   S.lastStep = undefined
   S.executed = undefined
   S.attempts.clear()
+  S.signals.clear()
+  S.floors.clear()
   S.lastAttempt = undefined
   S.mainTurn = undefined
 }
@@ -545,6 +560,35 @@ async function skillTrimHint($: EngineInterface) {
     if (S.config.chatNotice) await chatNotice($, text)
   } catch {
     // A hint only.
+  }
+}
+
+// What git says about the working tree: branch and the size of what is
+// uncommitted. Two quick reads side by side; anything that goes wrong (no
+// repository, no git, too slow) is no facts.
+async function gitFacts($: EngineInterface): Promise<GitFacts | undefined> {
+  try {
+    const run = (argv: string[]) => $.process.run(argv, { timeoutMs: 2000 })
+    const [status, numstat] = await Promise.all([run(['git', 'status', '--porcelain=v1', '-b']), run(['git', 'diff', '--numstat', 'HEAD'])])
+    if (status.exitCode !== 0) return undefined
+    return parseGit(status.stdout, numstat.exitCode === 0 ? numstat.stdout : '')
+  } catch {
+    return undefined
+  }
+}
+
+// Once, the first time the gist of the code goes to Jev: say so and how to stop it.
+async function codeNotice($: EngineInterface) {
+  const c = S.config
+  if (!c.enabled || !c.key || c.routing === 'off' || !c.codeSnippets || !c.awareness.enabled) return
+  try {
+    if (await $.store.get(CODE_NOTICE_KEY)) return
+    await $.store.set(CODE_NOTICE_KEY, true)
+    const text = "jev-router: to judge the model and effort, Jev now also sees the gist of the code this conversation has touched: an outline and short snippets of files it read or edited (keys and tokens redacted, secret-looking files left out; nothing else of your project). Turn it off with 'Share the gist of the code with Jev' in this plugin's settings."
+    $.ui.toast(text)
+    if (c.chatNotice) await chatNotice($, text)
+  } catch {
+    // A notice only.
   }
 }
 
@@ -1538,6 +1582,7 @@ export const register: Register = (on, options) => {
     await loadCaps($)
     await loadHidden($)
     await skillTrimHint($)
+    await codeNotice($)
     const idle = inactiveReason(config)
     if (idle) setStatus($, idle)
     if (config.enabled && config.key && config.tools.save) {
@@ -1552,6 +1597,7 @@ export const register: Register = (on, options) => {
       has_key: config.key.length > 0,
       skill_routing: config.skillRouting,
       routing: config.routing,
+      escalation: config.escalation.mode,
       gate_threshold: config.gateThreshold,
       fits_threshold: config.fitsThreshold,
       feasibility_threshold: config.feasibleThreshold,
@@ -1700,16 +1746,25 @@ export const register: Register = (on, options) => {
     // The prompt, then the conversation excerpts, share one state budget Jev can take.
     const sent = scrubText(text, [config.key]).slice(0, Math.min(config.maxPromptChars, STATE_CHAR_BUDGET - STATE_RESERVE))
     let messages
-    if (config.awareness.enabled && config.awareness.maxChars > 0) {
+    // Sharing recent context off also keeps the work facts home: only the prompt goes.
+    const sharing = config.awareness.enabled
+    if ((sharing && config.awareness.maxChars > 0) || (sharing && (config.workSummary || config.codeSnippets))) {
       try { messages = await $.session.messages() } catch { /* unknown; never reuse another session's transcript */ }
     }
-    const recent = recentContext(messages, text, { ...config.awareness, maxChars: Math.min(config.awareness.maxChars, Math.max(0, STATE_CHAR_BUDGET - STATE_RESERVE - sent.length)) }, [config.key])
+    // The work (a summary, an outline and snippets) goes with the routing facts, so only
+    // while models are routed. It is sized first: the excerpts take what it leaves.
+    const summary = config.routing !== 'off' && sharing && config.workSummary ? workFacts(messages, await gitFacts($)) : undefined
+    const snippets = config.routing !== 'off' && sharing && config.codeSnippets ? codeSnippets(messages, [config.key]) : []
+    const outlines = config.routing !== 'off' && sharing && config.codeSnippets ? codeOutline(messages, [config.key]) : []
+    const work = composeWork(summary, snippets, outlines)
+    const workChars = work ? JSON.stringify(work).length : 0
+    const recent = recentContext(messages, text, { ...config.awareness, maxChars: Math.min(config.awareness.maxChars, Math.max(0, STATE_CHAR_BUDGET - STATE_RESERVE - sent.length - workChars)) }, [config.key])
     if (config.routing !== 'off') await readContext($)
     // Before any response was seen (a fresh session, a plugin reload), the
     // session model stands in for the current one so context costs are known.
     const current = config.routing === 'off' ? undefined : S.executed ?? await sessionStep($)
     const families = config.routing === 'off' ? [] : routableFamilies(current)
-    const facts = config.routing !== 'off' ? routingFacts(S.cache, current, S.caps, S.failed, S.lastAttempt, await $.clock.now(), cacheNow(), S.windows, S.executed ? 'last-response' : 'session-model') : undefined
+    const facts = config.routing !== 'off' ? routingFacts(S.cache, current, S.caps, S.failed, S.lastAttempt, await $.clock.now(), cacheNow(), S.windows, S.executed ? 'last-response' : 'session-model', work) : undefined
 
     const result: RouteResult = await route(
       sent,
@@ -1797,6 +1852,8 @@ export const register: Register = (on, options) => {
       sent_chars: sent.length,
       index_size: skills.length,
       skill_routing: config.skillRouting,
+      // Only what was sent, in counts: no path, no command, no code.
+      work: work ? { tool_calls: Object.values(work.recent_tool_calls ?? {}).reduce((a, b) => a + b, 0), edited: work.edited_files?.length ?? 0, read: work.read_files?.length ?? 0, git: work.repository != null, snippets: work.code_snippets?.length ?? 0, outlines: work.code_outline?.length ?? 0 } : undefined,
       tools: toolOptions.length > 0 ? { options: toolOptions.length, match: result.toolMatch ?? null, picked: pickedTools.map(p => ({ name: p.tool.name, scope: p.tool.scope, probability: p.probability })), stale: staleTools } : undefined,
       outcome: result.outcome,
       reason: result.reason,
@@ -1837,6 +1894,8 @@ export const register: Register = (on, options) => {
     S.mainTurn = e.turnId
     await autoProbe($, 'first use on this Claude Code')
     S.attempts.set(e.turnId, { ...EMPTY_ATTEMPT })
+    S.signals.set(e.turnId, emptySignals())
+    S.floors.delete(e.turnId)
     while (S.attempts.size > KEPT_TURNS) {
       const oldest = S.attempts.keys().next().value
       if (oldest === undefined) break
@@ -1931,9 +1990,44 @@ export const register: Register = (on, options) => {
     }
     const final = frozen.plan
     const apply = config.routing === 'on' && decision !== undefined
-    const plan = apply
+    let plan = apply
       ? { ...final, changed: final.model !== e.model || final.effort !== e.effort }
       : { ...final, model: e.model, effort: e.effort, changed: false }
+
+    // Trouble in this turn (calls failing, a file edited back and forth): the
+    // pair goes up a rung for this step and the ones after it. Switching needs
+    // model routing on; otherwise it only records what it would do.
+    const escalating = config.escalation.mode !== 'off' && config.routing !== 'off'
+    const live = config.escalation.mode === 'on' && config.routing === 'on'
+    let escalation: Record<string, unknown> | undefined
+    if (escalating) {
+      let pair = { model: plan.model, effort: plan.effort }
+      if (live) pair = raise(pair, S.floors.get(e.turnId))
+      const signals = S.signals.get(e.turnId) ?? emptySignals()
+      const trigger = triggered(signals, config.escalation.limits)
+      if (trigger) {
+        // The evidence starts over either way, so the next rung needs new trouble.
+        S.signals.set(e.turnId, afterEscalation(signals))
+        const rung = nextRung(pair, S.caps, S.failed)
+        escalation = rung
+          ? { trigger, kind: rung.kind, from_model: pair.model, from_effort: pair.effort, to_model: rung.pair.model, to_effort: rung.pair.effort, live }
+          : { trigger, kind: 'top', from_model: pair.model, from_effort: pair.effort, live }
+        if (rung && live) {
+          S.floors.set(e.turnId, rung.pair)
+          pair = rung.pair
+          setStatus($, `escalated to ${familyOf(pair.model) ?? pair.model}/${pair.effort ?? '-'} · ${trigger}`)
+        }
+      }
+      if (live && (pair.model !== plan.model || pair.effort !== plan.effort)) {
+        plan = {
+          ...plan,
+          model: pair.model,
+          effort: pair.effort,
+          changed: pair.model !== e.model || pair.effort !== e.effort,
+          reasons: [...plan.reasons, `escalate:${escalation?.trigger ?? 'floor'}`],
+        }
+      }
+    }
     const target = familyOf(plan.model)
     const entry: Record<string, unknown> = {
       type: 'step',
@@ -1953,6 +2047,7 @@ export const register: Register = (on, options) => {
       jev_feasible: decision?.feasible,
       final_recommended: { model: final.model, effort: final.effort },
       cache_advice: frozen.advice,
+      escalation,
     }
     let requestAt = await $.clock.now()
     if (!plan.changed) {
@@ -2069,6 +2164,10 @@ export const register: Register = (on, options) => {
     if (meta.agentId === undefined && turnId && S.attempts.has(turnId)) {
       const facts = S.attempts.get(turnId)!
       S.attempts.set(turnId, { ...facts, toolFailures: facts.toolFailures + (result.isError === true ? 1 : 0), deniedTools: facts.deniedTools + (result.deny !== undefined ? 1 : 0) })
+      if (config.escalation.mode !== 'off') {
+        const call = { tool: String((e as { tool?: unknown }).tool ?? ''), input: { ...(e as Record<string, unknown>) }, isError: result.isError === true, denied: result.deny !== undefined }
+        S.signals.set(turnId, noteCall(S.signals.get(turnId) ?? emptySignals(), call))
+      }
     }
     return result
   }).catch(($, e, next) => next(e))
@@ -2094,6 +2193,8 @@ export const register: Register = (on, options) => {
     if (S.mainTurn === e.turnId) S.mainTurn = undefined
     const requests = S.stepCounts.get(e.turnId)
     S.stepCounts.delete(e.turnId)
+    S.signals.delete(e.turnId)
+    S.floors.delete(e.turnId)
     if (requests) {
       S.turnLengths = [...S.turnLengths, requests].slice(-KEPT_TURN_LENGTHS)
       try {

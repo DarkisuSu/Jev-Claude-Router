@@ -30,6 +30,9 @@ export const SHARED: Record<string, Spec> = {
   tool_threshold: { where: 'page', kind: 'number', default: 0.5, min: 0, max: 1, what: 'The best-fitting saved tool is suggested when Jev puts at least this probability on one of them doing what the request asks (a yes/no question over the saved tools)' },
   tool_save_threshold: { where: 'page', kind: 'number', default: 0.5, min: 0, max: 1, what: 'A tool is saved when Jev judges at least this likely that it serves other work; 0 saves without asking Jev' },
   decision_routing: { where: 'page', kind: 'boolean', default: true, what: 'Let Claude automatically submit assistant-owned typed decisions to Jev throughout a task' },
+  work_summary: { where: 'page', kind: 'boolean', default: true, what: 'Experimental. Send Jev a summary of the work in progress with each message: which tools ran lately and how many failed, the files edited and read (paths only, never contents), and how much is uncommitted in git. No code leaves your machine' },
+  code_snippets: { where: 'page', kind: 'boolean', default: true, what: 'Experimental. Send Jev the gist of the code with each message, taken only from the conversation\'s own tool records: an outline of the files lately read or edited (what each is for and its type and method signatures) and short snippets (the text just edited, the end of a failed command, the start of a file Claude read). Keys and tokens are redacted and files that look like secrets are left out, but this is source code leaving your machine' },
+  escalation: { where: 'page', kind: 'choice', default: 'dry-run', options: ['off', 'dry-run', 'on'], what: 'Experimental. When tool calls keep failing within a turn, raise the effort (then the model) for the steps that follow. dry-run only logs what it would do; it also needs model routing on' },
 
   // In $.store, set with /jev-model set.
   model_haiku: { where: 'store', kind: 'text', default: DEFAULT_MODEL_CRITERIA.haiku!, what: 'What Jev is told Haiku work is' },
@@ -48,6 +51,10 @@ export const SHARED: Record<string, Spec> = {
   decision_confidence_threshold: { where: 'store', kind: 'number', default: 0.6, min: 0.5, max: 1, what: 'Decision answers below this are uncertain: Choice/Score confidence, or Noul probability of the likelier yes/no outcome' },
   jev_context_chars: { where: 'store', kind: 'number', default: 12000, min: 0, max: 20000, integer: true, what: 'Most characters of recent conversation sent to Jev (also held to what the request leaves of a 24000-character state budget); 0 sends none' },
   jev_context_messages: { where: 'store', kind: 'number', default: 16, min: 1, max: 40, integer: true, what: 'Most recent user/assistant messages those excerpts come from' },
+  escalate_failures: { where: 'store', kind: 'number', default: 3, min: 1, max: 20, integer: true, what: 'Escalation: failed Bash, PowerShell, Edit or Write calls in a row that count as trouble' },
+  escalate_repeats: { where: 'store', kind: 'number', default: 3, min: 2, max: 20, integer: true, what: 'Escalation: times the same command or file operation fails in a turn before it counts as trouble' },
+  escalate_edits: { where: 'store', kind: 'number', default: 4, min: 2, max: 30, integer: true, what: 'Escalation: successful edits of the same file in a turn before it counts as trouble (the work is going back and forth)' },
+  escalate_max: { where: 'store', kind: 'number', default: 2, min: 1, max: 5, integer: true, what: 'Escalation: most rungs one turn climbs; after an escalation the next one needs new trouble' },
 }
 
 const text = (v: unknown) => (typeof v === 'string' && v.trim() && v.trim().length <= 500 ? v.trim() : undefined)
@@ -85,9 +92,20 @@ export const sharedConfig = (page: Record<string, unknown>, store: Record<string
       max: v('tool_max') as number,
     },
     chatNotice: v('chat_notice') as boolean,
+    workSummary: v('work_summary') as boolean,
+    codeSnippets: v('code_snippets') as boolean,
     skillTrimHint: v('skill_trim_hint') as boolean,
     probeWaitMs: v('probe_wait_ms') as number,
     decisionRouting: v('decision_routing') as boolean,
+    escalation: {
+      mode: v('escalation') as 'off' | 'dry-run' | 'on',
+      limits: {
+        failures: v('escalate_failures') as number,
+        repeats: v('escalate_repeats') as number,
+        edits: v('escalate_edits') as number,
+        max: v('escalate_max') as number,
+      },
+    },
     decisionConfidence: v('decision_confidence_threshold') as number,
     feasibleThreshold: v('feasibility_threshold') as number,
     autoProbe: v('auto_probe') as boolean,

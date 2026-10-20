@@ -44,6 +44,29 @@
       "description": "Expose the decide tool and instruct Claude to send narrow assistant-owned decisions to api.typesafe.ai with relevant task evidence. User choices, preferences and authorization stay with the user. Each tool call makes a separate Jev request; no actions are executed by the tool.\nDefault: on",
       "default": true
     },
+    "work_summary": {
+      "type": "boolean",
+      "title": "Routing · Share a summary of the work with Jev (experimental)",
+      "description": "Experimental. With each message, send Jev which tools ran lately and how many failed, which files were edited and read (paths only, never contents or commands) and how much is uncommitted in git, so it can judge which model and effort the work needs. Paths of files that look like secrets are replaced. No code is sent by this one.\nDefault: on",
+      "default": true
+    },
+    "code_snippets": {
+      "type": "boolean",
+      "title": "Routing · Share the gist of the code with Jev (experimental)",
+      "description": "Experimental. With each message, send Jev the gist of the code, taken only from this conversation's own tool records: an outline of the files lately read or edited (what each is for, and its type and method signatures) and short snippets (the text just edited, the end of a failed command, the start of a file Claude read). Keys and tokens are redacted and files that look like secrets are left out. This sends source code to api.typesafe.ai: turn it off if your organization does not allow that.\nDefault: on",
+      "default": true
+    },
+    "escalation": {
+      "type": "string",
+      "title": "Model · Escalate when work goes wrong (experimental)",
+      "description": "Experimental. Within one turn, when tool calls keep failing (Bash, PowerShell, Edit or Write failing in a row, the same operation failing again, or the same file edited back and forth), raise the effort, then the model, for the steps that follow. off: nothing. dry-run: only log what it would do. on: switch. Needs model routing on to switch.\nDefault: dry-run",
+      "options": [
+        "off",
+        "dry-run",
+        "on"
+      ],
+      "default": "dry-run"
+    },
     "gate_threshold": {
       "type": "number",
       "title": "Skill · Gate threshold",
@@ -134,7 +157,7 @@
     "jev_context_enabled": {
       "type": "boolean",
       "title": "Routing · Share recent context with Jev",
-      "description": "Send bounded recent user/assistant excerpts to api.typesafe.ai with the existing classification call. Tool payloads and skill blocks are excluded; common credentials are redacted on a best-effort basis. Excerpts are never logged. Disable to send only the current prompt text.\nDefault: true",
+      "description": "Send bounded recent user/assistant excerpts, a summary of the work in progress and the gist of the code to api.typesafe.ai with the existing classification call (the last two have their own switches). Tool payloads and skill blocks are excluded; common credentials are redacted on a best-effort basis. Excerpts are never logged. Disable to send only the current prompt text.\nDefault: true",
       "default": true
     }
   }

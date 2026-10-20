@@ -772,3 +772,138 @@ describe('a bigger tier is never rated below a smaller one', () => {
     expect(asked['feasible::sonnet::high']!.instructions).toContain('It can do everything the smaller tier can')
   })
 })
+
+describe('escalating when the work goes wrong', () => {
+  const ESCALATE = { ...ON, escalation: 'on' }
+
+  // The tool beneath: a command starting "fail" errors, any other works.
+  const tools = (on: On) => {
+    on('tool.call', async (_$, e) => ({ isError: String((e as { command?: unknown }).command ?? '').startsWith('fail') ? true : undefined, result: 'x' }) as never)
+  }
+  const call = ($: Engine, command: string, tool = 'Bash') => $.tool.call({ tool, command, file_path: command } as never)
+  const sent = (seen: Seen[]) => seen.map(s => `${s.model}/${String(s.effort)}`)
+
+  test('three failed commands in a row raise the effort for the steps after, and it stays raised', { options: ESCALATE }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, LEARNED)
+    const w = world(on, answers({ 'opus::medium': 0.9 }))
+    const seen = bottom(on)
+    tools(on)
+
+    await turn($, w)
+    await step($, 't1', 0)
+    await call($, 'fail one')
+    await call($, 'fail two')
+    await call($, 'fail three')
+    await step($, 't1', 1)
+    await step($, 't1', 2)
+
+    expect(sent(seen)).toEqual([`${OPUS}/medium`, `${OPUS}/high`, `${OPUS}/high`])
+    const escalations = steps(w).map(s => s.escalation).filter(Boolean)
+    expect(escalations).toHaveLength(1)
+    expect(escalations[0]).toMatchObject({ trigger: 'failures', kind: 'effort', to_effort: 'high', live: true })
+    expect(steps(w)[1]!.reasons).toContain('escalate:failures')
+  })
+
+  test('a command that works in between ends the run, so nothing is raised', { options: ESCALATE }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, LEARNED)
+    const w = world(on, answers({ 'opus::medium': 0.9 }))
+    const seen = bottom(on)
+    tools(on)
+
+    await turn($, w)
+    await step($, 't1', 0)
+    await call($, 'fail one')
+    await call($, 'fail two')
+    await call($, 'fine')
+    await call($, 'fail three')
+    await step($, 't1', 1)
+
+    expect(sent(seen)).toEqual([`${OPUS}/medium`, `${OPUS}/medium`])
+    expect(steps(w).some(s => s.escalation)).toBe(false)
+  })
+
+  test('failed reads and searches are ordinary searching', { options: ESCALATE }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, LEARNED)
+    const w = world(on, answers({ 'opus::medium': 0.9 }))
+    const seen = bottom(on)
+    tools(on)
+
+    await turn($, w)
+    await step($, 't1', 0)
+    for (const tool of ['Read', 'Grep', 'Read', 'Glob']) await call($, 'fail x', tool)
+    await step($, 't1', 1)
+
+    expect(sent(seen)).toEqual([`${OPUS}/medium`, `${OPUS}/medium`])
+  })
+
+  test('dry-run only logs what it would do', { options: { ...ON, escalation: 'dry-run' } }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, LEARNED)
+    const w = world(on, answers({ 'opus::medium': 0.9 }))
+    const seen = bottom(on)
+    tools(on)
+
+    await turn($, w)
+    await step($, 't1', 0)
+    for (const c of ['fail 1', 'fail 2', 'fail 3']) await call($, c)
+    await step($, 't1', 1)
+
+    expect(sent(seen)).toEqual([`${OPUS}/medium`, `${OPUS}/medium`])
+    expect(steps(w)[1]!.escalation).toMatchObject({ trigger: 'failures', to_effort: 'high', live: false })
+  })
+
+  test('off watches nothing', { options: { ...ON, escalation: 'off' } }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, LEARNED)
+    const w = world(on, answers({ 'opus::medium': 0.9 }))
+    const seen = bottom(on)
+    tools(on)
+
+    await turn($, w)
+    await step($, 't1', 0)
+    for (const c of ['fail 1', 'fail 2', 'fail 3']) await call($, c)
+    await step($, 't1', 1)
+
+    expect(sent(seen)).toEqual([`${OPUS}/medium`, `${OPUS}/medium`])
+    expect(steps(w).some(s => s.escalation)).toBe(false)
+  })
+
+  test('with model routing dry-run nothing is switched, whatever escalation says', { options: { ...ESCALATE, model_routing: 'dry-run' } }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, LEARNED)
+    const w = world(on, answers({ 'opus::medium': 0.9 }))
+    const seen = bottom(on)
+    tools(on)
+
+    await turn($, w)
+    await step($, 't1', 0)
+    for (const c of ['fail 1', 'fail 2', 'fail 3']) await call($, c)
+    await step($, 't1', 1)
+
+    expect(sent(seen)).toEqual([`${SONNET}/medium`, `${SONNET}/medium`])
+    expect(steps(w)[1]!.escalation).toMatchObject({ live: false })
+  })
+
+  test('a new turn starts clean', { options: ESCALATE }, async ($, on) => {
+    mock.clock(on)
+    mock.store(on, LEARNED)
+    const w = world(on, answers({ 'opus::medium': 0.9 }))
+    const seen = bottom(on)
+    tools(on)
+    on('turn.complete', () => ({ text: '' }) as never)
+
+    await turn($, w)
+    await step($, 't1', 0)
+    for (const c of ['fail 1', 'fail 2', 'fail 3']) await call($, c)
+    await step($, 't1', 1)
+    await $.turn.complete({ turnId: 't1', answer: 'OK', durationMs: 1, isAborted: false } as never)
+    await $.prompt.submit({ text: PROMPT, asUser: true })
+    await $.turn.start({ text: PROMPT, turnId: 't2' })
+    await step($, 't2', 0)
+
+    expect(sent(seen)).toEqual([`${OPUS}/medium`, `${OPUS}/high`, `${OPUS}/medium`])
+  })
+})

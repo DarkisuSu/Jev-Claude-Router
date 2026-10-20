@@ -144,6 +144,15 @@ Only when all of these hold. Otherwise the step goes as the engine resolved it, 
 
 **Failure.** If a routed request fails, the target is marked failed for the session and the rest of the turn is pinned to the session model. If the probe confirmed that a failed step can be sent again, and nothing had streamed yet, the step is resent on the session's own model.
 
+### Escalating when the work goes wrong (experimental)
+
+Jev chooses the model and effort once, when the prompt is sent. When the work then goes badly inside the turn, the router can raise the pair for the steps that follow, without waiting for the next message. It watches the tool calls of the turn and no one is asked: nothing leaves your machine for this.
+
+- **What counts as trouble.** Failed `Bash`, `PowerShell`, `Edit` or `Write` calls in a row (`escalate_failures`, 3); the same command or file operation failing again (`escalate_repeats`, 3); the same file edited successfully again and again (`escalate_edits`, 4). A failed `Read`, `Grep` or search is ordinary searching and counts for nothing, and neither does a call you refused.
+- **What it does.** One rung up: the next effort level, and at `max` the next family (only one seen answering with its full id, started at `high`). The rung becomes the floor for the rest of the turn: later steps are never lower. After an escalation the evidence starts over, and a turn climbs at most `escalate_max` (2) rungs. A new message starts clean and Jev judges it again.
+- **The switch.** `escalation` on the settings page: `off`, `dry-run` (the default: the step log's `escalation` field shows what it would have done and nothing is changed) or `on`. Switching also needs `model_routing` `on`. When it switches, the status line says `escalated to <family>/<effort> · <trigger>`.
+- **Limits.** The thresholds are first guesses with no data behind them; read the log in `dry-run` before turning it on. A trouble that is not a failed call (a wrong approach that runs without error) is not seen.
+
 ## Costs
 
 ### Pair cost
@@ -205,6 +214,15 @@ With `jev_context_enabled` on (default), Jev gets up to `jev_context_chars` (120
 
 `null` means no evidence either way, not "unlimited". No window is written into the code.
 
+### The work in progress (experimental)
+
+Two switches, both on by default, add what the conversation has been doing to the questions about model and effort, so Jev can judge how big or how risky the work is and what the code at hand is like. Both read only the conversation's own tool records (`$.session.messages()`), never the project, and only while model routing is on and `Share recent context with Jev` (`jev_context_enabled`) is on: turning that off sends the prompt alone. The first time the code goes out the router says so once, with how to stop it.
+
+- **`work_summary`**: counts of the recent tool calls (the latest 40) and the failed ones, the files edited (with how often) and read, and from git the branch, the number of changed and untracked files and the lines added and removed (`git status` and `git diff --numstat HEAD`, two reads that give up after two seconds). Paths and numbers only: no code, no command text, no output. A path that looks like a secret (`.env`, a keystore, a key, a name with `password`, `secret`, `token`) is replaced.
+- **`code_snippets`** ("Share the gist of the code with Jev"): the gist of the code those records hold, in two parts. **`code_outline`**: for up to five files lately read or edited, newest first, what the file is for (its opening comment) and the signatures of its types and methods (C#, TypeScript, JavaScript and Python are recognised; no bodies), within 2,500 characters. **`code_snippets`**: short code, within 4,000 characters: the text just edited (before and after, up to 12 lines each), the last 8 lines of a failed command's output (not the command), and the start of the last two files read. Keys and tokens are redacted and a file whose path looks like a secret is left out. **This sends source code to api.typesafe.ai**; turn it off if your organization does not allow that.
+
+The request carries them as `routing_context.work`, with a note that they may belong to an earlier task, and the questions about each tier and effort say what the fields are. The log keeps counts only (tool calls, files, whether git answered, outlines, snippets), never a path or any code.
+
 ### Previous attempt
 
 `routing_context.previous_attempt` counts the last turn's routed-request failures, failed tool calls and denied tool calls. These are execution counts, not a judgment that an answer was wrong (`correctness: unknown`).
@@ -242,6 +260,9 @@ The settings page holds the settings people change:
 | Gate threshold | 0.5 |
 | Fits threshold | 0.5 |
 | Model routing | dry-run |
+| Share a summary of the work with Jev (`work_summary`, experimental) | on |
+| Share the gist of the code with Jev (`code_snippets`, experimental) | on |
+| Escalate when the work goes wrong (`escalation`, experimental) | dry-run |
 | Fallback model | session |
 | Feasibility threshold | 0.6 |
 | Share recent context with Jev (`jev_context_enabled`) | on |

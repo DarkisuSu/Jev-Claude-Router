@@ -123,6 +123,8 @@ export type World = {
   status: string[]
   messages: MessageLike[]
   messageReads: number
+  // What git answers when the router asks about the working tree.
+  git?: { status: string; numstat: string }
 }
 
 // On Windows the engine hands fs hooks native backslash paths; files are kept
@@ -201,6 +203,7 @@ export const world = (on: On, jev: Jev, extra?: { version?: string; gui?: Record
       w.deletedFiles.push(path)
       w.written.delete(slash(path))
     }
+    if (argv[0] === 'git' && w.git) return { value: { exitCode: 0, stdout: argv[1] === 'status' ? w.git.status : w.git.numstat, stderr: '' } as never }
     return { value: { exitCode: 0, stdout: '', stderr: '' } as never }
   })
   on('http.fetch', async ($, e) => {

@@ -2,6 +2,7 @@
 // summary. No tools, credentials, headers or persisted transcript content.
 import { cacheEvidence, type CacheConfig, type CacheState } from './cache'
 import { FAMILIES, type Caps, type Family, type Step } from './model'
+import type { WorkFacts } from './work'
 
 // What the request and the excerpts may total, in characters. Jev 1.13 takes
 // 32k tokens for the state plus its longest question; a character can be a
@@ -17,16 +18,26 @@ export type RecentContext = { text: string; messages: number; source: 'session-e
 export type AttemptFacts = { modelRequestFailed: boolean; toolFailures: number; deniedTools: number; correctness: 'unknown' }
 export const EMPTY_ATTEMPT: AttemptFacts = { modelRequestFailed: false, toolFailures: 0, deniedTools: 0, correctness: 'unknown' }
 
-export const scrubText = (text: string, secrets: readonly string[] = []): string => {
+const redactKnown = (text: string, secrets: readonly string[]) => {
   let result = text
   for (const secret of secrets) if (secret) result = result.split(secret).join('[redacted]')
   return result
-    .replace(/<skill_(?:instructions|relevance)\b[^>]*>[\s\S]*?<\/skill_(?:instructions|relevance)>/gi, '[skill content omitted]')
-    .replace(/```[\s\S]*?(?:```|$)/g, '[code omitted]')
+}
+const redactPatterns = (text: string) =>
+  text
     .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/g, '[redacted]')
     .replace(/\b(?:sk-[A-Za-z0-9_-]{8,}|Bearer\s+[A-Za-z0-9._~+\/-]+)/gi, '[redacted]')
     .replace(/((?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|authorization|password|secret)\s*["']?\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]')
-}
+
+export const scrubText = (text: string, secrets: readonly string[] = []): string =>
+  redactPatterns(
+    redactKnown(text, secrets)
+      .replace(/<skill_(?:instructions|relevance)\b[^>]*>[\s\S]*?<\/skill_(?:instructions|relevance)>/gi, '[skill content omitted]')
+      .replace(/```[\s\S]*?(?:```|$)/g, '[code omitted]'),
+  )
+
+// Secrets only, code kept: for text that has to show code, such as the snippets of the work.
+export const redactSecrets = (text: string, secrets: readonly string[] = []): string => redactPatterns(redactKnown(text, secrets))
 
 // A long message keeps its start and its end: an answer's conclusion is
 // usually in the last lines.
@@ -71,7 +82,7 @@ export const recentContext = (messages: readonly MessageLike[] | undefined, requ
 
 // The facts Jev judges each tier and effort with. Costs are not here: the
 // router costs every pair itself and takes the cheapest feasible one.
-export const routingFacts = (state: CacheState, current: Step | undefined, caps: Caps | undefined, failed: ReadonlySet<Family>, attempt: AttemptFacts | undefined, now: number, cache: CacheConfig, windows: Partial<Record<Family, number>> = {}, currentSource: 'last-response' | 'session-model' = 'last-response') => {
+export const routingFacts = (state: CacheState, current: Step | undefined, caps: Caps | undefined, failed: ReadonlySet<Family>, attempt: AttemptFacts | undefined, now: number, cache: CacheConfig, windows: Partial<Record<Family, number>> = {}, currentSource: 'last-response' | 'session-model' = 'last-response', work?: WorkFacts) => {
   const evidence = cacheEvidence(state, now, cache)
   // What each tier is known to hold. Evidence only: a tier never seen on a
   // context this large may still hold it, and no window is assumed.
@@ -93,6 +104,7 @@ export const routingFacts = (state: CacheState, current: Step | undefined, caps:
       note: 'A tier whose context window is smaller than the conversation cannot run it. largest_context_answered is the biggest context a response on that tier came back over; context_window_reported comes from Claude Code for the session model only. null means no evidence either way.',
     },
     previous_attempt: attempt ?? null,
+    ...(work ? { work } : {}),
     answer_correctness_verified: 'unknown',
   }
 }
