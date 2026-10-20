@@ -229,6 +229,15 @@ describe('trimming the skill listing', () => {
     await start($)
     expect(reminders(session).some(x => x.includes('(1 project skill in full)'))).toBe(true)
   })
+  test('skill selection off: no reminder, since the listing matters only while the hint is used', { options: { ...PREHINT, skill_routing: false } }, async ($, on) => {
+    mock.clock(on); memoryStore(on)
+    const session = mock.session(on)
+    const w = world(on, jevFor()); project(w)
+    beneath(on)
+    await start($)
+    expect(reminders(session)).toHaveLength(0)
+    expect(w.status.every(x => !x.includes('/jev-skills opt'))).toBe(true)
+  })
   test('skill_trim_hint off, or a settings file that is not JSON: no reminder', { options: { ...PREHINT, skill_trim_hint: false } }, async ($, on) => {
     mock.clock(on); memoryStore(on)
     const session = mock.session(on)

@@ -520,11 +520,11 @@ async function userCap($: EngineInterface): Promise<number | undefined> {
   }
 }
 
-// Every session, while the listing is not trimmed (no description cap, or a
+// Every session while skill selection is on, and while the listing is not trimmed (no description cap, or a
 // project skill still in full): say so once, with the command that fixes it.
 // Nothing is written.
 async function skillTrimHint($: EngineInterface) {
-  if (!S.config.enabled || !S.config.skillTrimHint) return
+  if (!S.config.enabled || !S.config.skillRouting || !S.config.skillTrimHint) return
   try {
     const state = await projectSkillState($)
     if (!state?.readable) return

@@ -63,7 +63,7 @@
     "skill_trim_hint": {
       "type": "boolean",
       "title": "Skill · Remind me to trim the skill listing",
-      "description": "At each session start, say so while the skill listing is not trimmed (no description cap, or a project skill still in full), and name the command that trims it (/jev-skills opt). Nothing is written until you run it.\\nDefault: on",
+      "description": "With skill selection on, at each session start say so while the skill listing is not trimmed (no description cap, or a project skill still in full), and name the command that trims it (/jev-skills opt). Nothing is written until you run it.\\nDefault: on",
       "default": true
     },
     "chat_notice": {
