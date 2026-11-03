@@ -267,7 +267,7 @@ describe('awareness engine integration', () => {
     // keeps its cache, so all three opus efforts cost the same context.
     expect(sent.map(s => `${s.model}/${s.effort}`)).toEqual([`${O55}/high`, `${O55}/high`])
     const round = logLines(w).find(l => l.type === 'round')!
-    expect(round.decision).toEqual({ family: 'opus', effort: 'high', how: 'cheapest-feasible', usd: 0.865, threshold: 0.6 })
+    expect(round.decision).toEqual({ family: 'opus', effort: 'high', how: 'cheapest-feasible', usd: 0.865, threshold: 0.5 })
     expect(round.cost_basis).toEqual({ context_tokens: 865000, cache: 'unknown', ttl: 'subscription-1h', horizon: 5, horizon_source: 'default', tolerance: 0.03, outputs: {} })
     expect(round.candidates.slice(0, 2).map((c: any) => [c.pair, c.usd])).toEqual([['opus/low', 0.865], ['opus/medium', 0.865]])
     expect(round.candidates.find((c: any) => c.pair === 'haiku/low').usd).toBe(1.038)
@@ -346,7 +346,7 @@ describe('awareness engine integration', () => {
     expect(body.state.recent_context.includes('old-session-secret-goal')).toBe(false)
     expect(body.state.routing_context.previous_attempt).toBe(null)
   })
-  test('dry-run records the cost-sorted pick without changing requests', { options: { ...options, model_routing: 'dry-run' } }, async ($, on) => {
+  test('dry-run records the cost-sorted pick without changing requests', { options: { ...options, model_routing: 'dry-run', feasibility_threshold: 0.6 } }, async ($, on) => {
     mock.clock(on); mock.store(on, { caps, advanced: { tier_monotonic: false } })
     const w = world(on, answer({ 'haiku::high': 0.3, 'sonnet::low': 0.5, 'opus::high': 0.9 })), sent = bottom(on, w)
     await begin($, 'a'); await step($, 'a')

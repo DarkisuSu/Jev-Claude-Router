@@ -20,7 +20,7 @@ export const MODEL_ROW = {
   label: 'Model',
   kind: 'choice',
   value: 'sonnet',
-  options: ['default', 'sonnet', 'sonnet[1m]', 'opus', 'opus[1m]', 'haiku', 'opusplan'],
+  options: ['default', 'sonnet', 'sonnet[1m]', 'opus', 'opus[1m]', 'haiku', 'fable', 'opusplan'],
   provider: { kind: 'engine' },
   isLocked: false,
 }

@@ -74,9 +74,16 @@ const pooled = (stats: OutputStats) => EFFORTS.flatMap(e => stats[e] ?? [])
 
 // The output a request at this effort is expected to produce: its own median
 // once it has MIN_SAMPLES, else the median over every effort seen.
+// A higher effort never costs less than a lower one: effort shapes how much is written, and
+// the medians per effort mix tasks of different sizes, so one can come out lower than the one
+// below it (xhigh, say, looking cheaper than medium) and make the router pay for more effort
+// as if it were the saving. Each own median is held up to the highest of the lower efforts'.
 export const outputEstimate = (stats: OutputStats, effort: Effort): { tokens?: number; basis: 'own' | 'pooled' | 'none' } => {
   const own = stats[effort] ?? []
-  if (own.length >= MIN_SAMPLES) return { tokens: median(own), basis: 'own' }
+  if (own.length >= MIN_SAMPLES) {
+    const lower = EFFORTS.slice(0, EFFORTS.indexOf(effort)).map(e => ((stats[e]?.length ?? 0) >= MIN_SAMPLES ? median(stats[e]!)! : 0))
+    return { tokens: Math.max(median(own)!, ...lower), basis: 'own' }
+  }
   const all = pooled(stats)
   if (all.length >= POOLED_MIN) return { tokens: median(all), basis: 'pooled' }
   return { basis: 'none' }

@@ -141,7 +141,11 @@ export const decide = (
   }
   const sorted = [...candidates].sort(cheaper)
   const able = sorted.filter(c => c.feasible >= threshold)
-  let pick = able[0] ?? [...sorted].sort((a, b) => b.feasible - a.feasible)[0]!
+  // With none feasible, the likeliest pair, but a cheaper one within FEASIBILITY_MARGIN of it
+  // stands in: Jev's answers differ by hundredths between efforts, and the top effort
+  // should not be paid for by a hundredth.
+  const likeliest = [...sorted].sort((a, b) => b.feasible - a.feasible)[0]!
+  let pick = able[0] ?? sorted.find(c => c.feasible >= likeliest.feasible - FEASIBILITY_MARGIN + 1e-9)!
   d.how = able.length > 0 ? 'cheapest-feasible' : 'none-feasible-most-capable'
   if (able.length > 0 && tolerance > 0 && pick.usd !== undefined) {
     // `able` is in cost order: each step up must be clearly likelier.

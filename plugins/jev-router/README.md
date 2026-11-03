@@ -103,7 +103,11 @@ These are the [TypeSafe primitives](https://docs.typesafe.ai/primitives). The to
 
 Jev judges one thing per question: whether a tier at an effort can do the work. The router does the cost arithmetic and picks. The questions ride the same rank_wide request as the skill ranking, so model routing adds no Jev call.
 
-**How a tier and an effort are described to Jev** follows Anthropic's guidance for Claude Code ("Claude model and effort level in Claude Code"): the model is how capable, the effort is how thorough. A larger tier is for subtle bugs, unfamiliar domains, architecture decisions and ambiguous work; a smaller one is for precisely described edits, mechanical changes and routine work, where it is also cheaper. Effort covers all the work, not only the thinking: how much is read, how much is checked, how far it goes before it reports back. The state carries one short text (`routing_context.judging`) that says so, and the default descriptions of the three tiers and five efforts are worded that way (change them with `/jev-model set model_<tier>` and `effort_<level>`). The wording was tuned against the real Jev: a precisely described rename must still rate feasible for the smallest tier at low effort, and a cross-layer design question must not, which a longer text or a low effort described as "would rather ask for more context" broke. **Fable.** The article names a tier above Opus, the most capable and the most expensive, saved for work the others cannot finish at any effort. The Model row lists it at initialization (`fable`, `fable[1m]`), so it is a fourth tier like the others: it is asked about, probed once on first use (the first message waits for that, as for any new tier) and ordered last. Its price is not in the router's table, so its cost is unknown and an unknown cost sorts after every known one: Fable runs only when no cheaper pair is judged able.
+**How a tier and an effort are described to Jev** follows Anthropic's guidance for Claude Code ("Claude model and effort level in Claude Code"): the model is how capable, the effort is how thorough. A larger tier is for subtle bugs, unfamiliar domains, architecture decisions and ambiguous work; a smaller one is for precisely described edits, mechanical changes and routine work, where it is also cheaper. Effort covers all the work, not only the thinking: how much is read, how much is checked, how far it goes before it reports back. The state carries one short text (`routing_context.judging`) that says so, and the default descriptions of the three tiers and five efforts are worded that way (change them with `/jev-model set model_<tier>` and `effort_<level>`). The wording was tuned against the real Jev: a precisely described rename must still rate feasible for the smallest tier at low effort, and a cross-layer design question must not, which a longer text or a low effort described as "would rather ask for more context" broke. **Fable.** The article names a tier above Opus, the most capable and the most expensive, saved for work the others cannot finish at any effort. The Model row lists it at initialization (`fable`, `fable[1m]`), so the router sees it, but it is routed only when `Route to Fable` (`fable_routing`) is on, and that is off by default: on some accounts it needs usage credits beyond a subscription (here it answers "Fable 5.1 requires usage credits"), and the router could not tell. Off, it is never asked about, probed or used, and `/jev-model probe` says so. On, it is a fourth tier like the others: asked about, probed on first use and ordered last. Its price is not in the router's table, so its cost is unknown and an unknown cost sorts after every known one: Fable runs only when no cheaper pair is judged able, or when Jev judges after trouble that a larger model is needed.
+
+**A probe that taught nothing is not repeated every session.** The first message of a session waits (up to `probe_wait_ms`) for the probes it starts. A family that was probed and has not taught its id is not probed again for 24 hours when other families are routable, so one that cannot answer here cannot hold every session's first message for the whole wait (`/jev-model probe` still tries it, and `/jev-data clear learned` forgets the memory).
+
+**An effort never costs less than a lower one.** The output per effort is the median of what requests at that effort wrote, and the medians mix tasks of different sizes: xhigh could come out lower than medium and win as the "cheapest" pair. Each effort's median is now held up to the highest of the lower efforts', so a higher effort is never the saving.
 
 | Question | Type | Judges |
 |---|---|---|
@@ -123,7 +127,7 @@ Tier and effort descriptions are part of each question. They have defaults and c
 
 ### How the pick is made
 
-1. **Feasible pairs.** Every tier and effort pair Jev judges at least `feasibility_threshold` (0.6) likely to complete the work.
+1. **Feasible pairs.** Every tier and effort pair Jev judges at least `feasibility_threshold` (0.5) likely to complete the work.
 2. **Cheapest.** The router costs each pair (see [Pair cost](#pair-cost)) and finds the cheapest feasible one. A pair with a known cost sorts before one with an unknown cost; unknown costs sort by the model's list price, then the lower tier, then the lower effort.
 3. **Within tolerance, the likeliest.** Feasible pairs costing within `cost_tolerance` (3%) of the cheapest may replace it, in cost order, by being at least 0.05 likelier in Jev's feasibility than the pair before. A cost difference that small is an estimate, and a clearly likelier pair is worth it; the 0.05 margin keeps hundredths in Jev's answers, or an effort whose cost is not measured yet (it looks as cheap as the rest), from pulling the pick up to a dearer level. With `cost_tolerance` 0 the cheapest always runs; with no known cost there is nothing to compare, and step 2's order stands. The log says `cheapest-feasible` or `most-feasible-within-tolerance`.
 4. **None feasible.** The pair Jev judges most able runs (the cheaper of equals), logged as `model:none-feasible-most-capable`.
@@ -264,9 +268,10 @@ The settings page holds the settings people change:
 | Model routing | dry-run |
 | Share a summary of the work with Jev (`work_summary`, experimental) | on |
 | Share the gist of the code with Jev (`code_snippets`, experimental) | on |
+| Route to Fable (`fable_routing`) | off |
 | Escalate when the work goes wrong (`escalation`, experimental) | dry-run |
 | Fallback model | session |
-| Feasibility threshold | 0.6 |
+| Feasibility threshold | 0.5 |
 | Share recent context with Jev (`jev_context_enabled`) | on |
 
 The rest are kept off the page, saved in `$.store`, and changed with `/jev-model set <name> <value>`. They apply at once:

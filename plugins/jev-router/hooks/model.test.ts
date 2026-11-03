@@ -4,9 +4,10 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { FAKE_KEY, PROMPT, logLines, rankWide, rerank, world, type World } from './testkit'
+import { FAKE_KEY, PROMPT, logLines, memoryStore, rankWide, rerank, world, type World } from './testkit'
 import { rankWideBody } from './router'
 import { FAMILIES, availableFrom, decide, familyOf, learn, monotonic, planStep } from './model'
+import { outputEstimate } from './cost'
 
 // Full ids as the engine resolves them; the router never sends a bare alias.
 const SONNET = 'claude-sonnet-test-id'
@@ -77,7 +78,7 @@ const steps = (w: World) => logLines(w).filter(l => l.type === 'step')
 // and haiku are learned. No context is known here, so pairs are ordered by
 // list price, then tier, then effort (unknown test ids: tier, then effort).
 describe('model routing', () => {
-  test('dry-run: logs what Jev would send and sends the session model unchanged', { options: { typesafe_api_key: FAKE_KEY, skill_routing: true, tool_routing: true, write_log: true } }, async ($, on) => {
+  test('dry-run: logs what Jev would send and sends the session model unchanged', { options: { typesafe_api_key: FAKE_KEY, skill_routing: true, tool_routing: true, write_log: true, feasibility_threshold: 0.6 } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
     const w = world(on, answers({ 'opus::high': 0.9 }))
@@ -167,7 +168,7 @@ describe('model routing', () => {
     expect(seen[0]).toEqual({ model: OPUS, effort: 'max', agentId: undefined })
   })
 
-  test('on: a cheaper pair below the feasibility threshold gives way to a dearer feasible one', { options: { typesafe_api_key: FAKE_KEY, skill_routing: true, tool_routing: true, write_log: true, model_routing: 'on' } }, async ($, on) => {
+  test('on: a cheaper pair below the feasibility threshold gives way to a dearer feasible one', { options: { typesafe_api_key: FAKE_KEY, skill_routing: true, tool_routing: true, write_log: true, model_routing: 'on', feasibility_threshold: 0.6 } }, async ($, on) => {
     mock.clock(on)
     mock.store(on, LEARNED)
     const w = world(on, answers({ 'haiku::low': 0.59, 'opus::medium': 0.8 }))
@@ -665,6 +666,17 @@ describe('model policy', () => {
     expect([d.family, d.effort, d.how]).toEqual(['opus', 'high', 'none-feasible-most-capable'])
   })
 
+  test('with no pair feasible, a cheaper pair within a hair of the likeliest stands in for it', () => {
+    const feasible = { opus: { medium: 0.4, high: 0.45, xhigh: 0.47, max: 0.48 } }
+    const d = decide('r', feasible, ['opus'], costs({ 'opus::medium': 1, 'opus::high': 1.2, 'opus::xhigh': 1.5, 'opus::max': 2.5 }), 0.5)
+    expect([d.family, d.effort, d.how]).toEqual(['opus', 'high', 'none-feasible-most-capable'])
+  })
+
+  test('with no pair feasible, a clearly likelier pair still wins over a cheaper one', () => {
+    const d = decide('r', { sonnet: { high: 0.2 }, opus: { high: 0.45 } }, ['sonnet', 'opus'], costs({ 'sonnet::high': 0.5, 'opus::high': 2 }), 0.5)
+    expect([d.family, d.effort]).toEqual(['opus', 'high'])
+  })
+
   test('only routable tiers are candidates; none answered is no-jev-answer', () => {
     expect(decide('r', { opus: { high: 0.9 } }, ['haiku'], () => ({}), 0.6).modelReason).toBe('none-routable')
     expect(decide('r', undefined, ['haiku'], () => ({}), 0.6).modelReason).toBe('no-jev-answer')
@@ -937,7 +949,7 @@ describe('Fable, the tier above Opus', () => {
 })
 
 describe('Jev decides how to escalate', () => {
-  const ESC = { ...ON, escalation: 'on' }
+  const ESC = { ...ON, escalation: 'on', fable_routing: true }
   const FABLE = 'claude-fable-test-id'
   const WITH_FABLE = { caps: { ...CAPS, families: { ...CAPS.families, fable: { id: FABLE, ok: true, effort: true, at: '' } } } }
 
@@ -1019,5 +1031,76 @@ describe('Jev decides how to escalate', () => {
   test('what Jev is sent about the work follows the switches: no code with sharing off', { options: { ...ESC, jev_context_enabled: false } }, async ($, on) => {
     const { w } = await run($, on, { more_effort: 0.6, no_change: 0.4 })
     expect(asked(w).state.escalation.work).toBeUndefined()
+  })
+})
+
+describe('what the log showed', () => {
+  const FABLE = 'claude-fable-test-id'
+  const ALL = { version: '9.9.9', families: { haiku: { id: HAIKU, ok: true, effort: true, at: '' }, sonnet: { id: SONNET, ok: true, effort: true, at: '' }, opus: { id: OPUS, ok: true, effort: true, at: '' } }, retryOk: true }
+  const WITH_FABLE = { ...ALL, families: { ...ALL.families, fable: { id: FABLE, ok: true, effort: true, at: '' } } }
+  const feasibleIds = (w: World) => Object.keys(JSON.parse(w.fetches[0]!.body).questions).filter(id => id.startsWith('feasible::'))
+
+  test('an effort never costs less than a lower one, whatever the medians say', () => {
+    const many = (tokens: number, n = 40) => Array.from({ length: n }, () => tokens)
+    const stats = { low: many(386), medium: many(1226), high: many(1205), xhigh: many(1187), max: many(2117) }
+    expect(outputEstimate(stats, 'low').tokens).toBe(386)
+    expect(outputEstimate(stats, 'medium').tokens).toBe(1226)
+    expect(outputEstimate(stats, 'high').tokens).toBe(1226)
+    expect(outputEstimate(stats, 'xhigh').tokens).toBe(1226)
+    expect(outputEstimate(stats, 'max').tokens).toBe(2117)
+    // An effort without enough samples of its own is left to the pooled median.
+    expect(outputEstimate({ medium: many(1226), xhigh: many(300, 4) }, 'xhigh').basis).toBe('pooled')
+  })
+
+  test('so xhigh no longer wins as the "cheapest" pair when medium is able', () => {
+    const flat = (family: string, effort: string) => ({ usd: effort === 'medium' || effort === 'high' || effort === 'xhigh' ? 0.2 : 0.3, rank: undefined })
+    const d = decide('r', { sonnet: { low: 0.5, medium: 0.7, high: 0.69, xhigh: 0.71, max: 0.72 } }, ['sonnet'] as never, flat as never, 0.6, 0.03)
+    expect(d.effort).toBe('medium')
+  })
+
+  test('Fable is not asked about unless Route to Fable is on, even when it is listed and learned', { options: { ...ON, skill_routing: false } }, async ($, on) => {
+    mock.clock(on); mock.store(on, { caps: WITH_FABLE })
+    const w = world(on, answers())
+    await turn($, w)
+    expect(feasibleIds(w).some(id => id.includes('::fable::'))).toBe(false)
+    expect(feasibleIds(w).some(id => id.includes('::opus::'))).toBe(true)
+  })
+
+  test('with Route to Fable on, it is asked about like the other tiers', { options: { ...ON, skill_routing: false, fable_routing: true } }, async ($, on) => {
+    mock.clock(on); mock.store(on, { caps: WITH_FABLE })
+    const w = world(on, answers())
+    await turn($, w)
+    expect(feasibleIds(w).filter(id => id.includes('::fable::'))).toHaveLength(5)
+  })
+
+  test('Fable is not probed while it is off, so no message waits for it', { options: { ...ON, skill_routing: false } }, async ($, on) => {
+    mock.clock(on); mock.store(on, { caps: ALL })
+    const aliases: string[] = []
+    on('agent.spawn', async (_, e) => { aliases.push(String(e.model)); return { model: FABLE } as never })
+    const w = world(on, answers())
+    await turn($, w)
+    expect(aliases).toEqual([])
+    expect(w.fetches.length).toBeGreaterThan(0)
+  })
+
+  test('a family probed lately that taught nothing is not probed again for a day, when others are routable', { options: { ...ON, skill_routing: false, fable_routing: true } }, async ($, on) => {
+    mock.clock(on); mock.store(on, { caps: ALL, 'probe-tried': { fable: 0 } })
+    const aliases: string[] = []
+    on('agent.spawn', async (_, e) => { aliases.push(String(e.model)); return { model: FABLE } as never })
+    const w = world(on, answers())
+    await turn($, w)
+    expect(aliases).toEqual([])
+    expect(w.fetches.length).toBeGreaterThan(0)
+  })
+
+  test('the first probe is remembered, so the next session does not repeat it', { options: { ...ON, skill_routing: false, fable_routing: true } }, async ($, on) => {
+    mock.clock(on)
+    const saved = memoryStore(on, { caps: ALL, advanced: { probe_wait_ms: 0 } })
+    const aliases: string[] = []
+    on('agent.spawn', async (_, e) => { aliases.push(String(e.model)); return { model: FABLE } as never })
+    const w = world(on, answers())
+    await turn($, w)
+    expect(aliases).toEqual(['fable'])
+    expect(saved['probe-tried']).toMatchObject({ fable: expect.any(Number) })
   })
 })

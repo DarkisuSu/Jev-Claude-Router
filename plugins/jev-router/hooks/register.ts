@@ -76,6 +76,11 @@ const PROBE_TEXT = 'Reply with exactly: OK'
 const MAX_REPROBES = 2
 // How often a waiting message looks at whether the probes have finished.
 const PROBE_POLL_MS = 250
+// A family that was probed and has not taught its id is not probed again for this long (when other
+// families are routable): a model that cannot answer here would otherwise hold every session's first
+// message for the whole wait.
+const PROBETRIED_KEY = 'probe-tried'
+const PROBE_RETRY_MS = 24 * 3600000
 // What Claude is handed to choose from when Jev cannot be reached.
 const FALLBACK_SKILLS = 80
 const FALLBACK_DESCRIPTION = 200
@@ -252,6 +257,7 @@ const S: {
   // conversation, and the families probed automatically in this load.
   probeAgents: Set<string>
   autoProbed: Set<Family>
+  probeTried: Record<string, number>
   turnProbes: Map<string, Probe>
   failed: Set<Family>
   lastStep?: Record<string, unknown>
@@ -291,6 +297,7 @@ const S: {
   trimHint: '',
   probeAgents: new Set(),
   autoProbed: new Set(),
+  probeTried: {},
   turnProbes: new Map(),
   failed: new Set(),
   options: {},
@@ -841,6 +848,8 @@ async function loadCaps($: EngineInterface) {
   }
   try {
     S.outputs = normalizeStats(await $.store.get(OUTPUTS_KEY))
+    const tried = await $.store.get(PROBETRIED_KEY)
+    S.probeTried = tried && typeof tried === 'object' && !Array.isArray(tried) ? (tried as Record<string, number>) : {}
     const lengths = await $.store.get(TURNLEN_KEY)
     S.turnLengths = Array.isArray(lengths) ? lengths.filter((n): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0).slice(-KEPT_TURN_LENGTHS) : []
   } catch {
@@ -894,6 +903,9 @@ async function probeFamily($: EngineInterface, family: Family, alias: string): P
   }
 }
 
+// Fable is routed only when asked for: it is the most expensive tier and may need usage credits.
+const allowed = (family: Family) => family !== 'fable' || S.config.fableRouting
+
 const isKnown = (family: Family) => {
   const known = S.caps?.families[family]
   return Boolean(known?.id && known.ok && known.effort !== undefined)
@@ -906,13 +918,19 @@ async function autoProbe($: EngineInterface, why: string, only?: Family): Promis
   if (!S.config.autoProbe || S.config.routing === 'off') return []
   if (S.available.source === 'not-read') await refreshModels($)
   if (!S.version) await loadCaps($)
+  const now = await $.clock.now()
+  const haveRoute = (Object.keys(S.available.models) as Family[]).some(f => allowed(f) && isKnown(f))
+  // With a family to route to already, one that was tried lately and is still not learned waits.
+  const lately = (family: Family) => haveRoute && S.probeTried[family] !== undefined && now - S.probeTried[family]! < PROBE_RETRY_MS
   const due = (Object.entries(S.available.models) as [Family, string][])
-    .filter(([family]) => (only ? family === only : !isKnown(family)) && !S.autoProbed.has(family))
+    .filter(([family]) => allowed(family) && (only ? family === only : !isKnown(family) && !lately(family)) && !S.autoProbed.has(family))
   if (due.length === 0) return []
   const lines: string[] = []
   const started: Family[] = []
   for (const [family, alias] of due) {
     S.autoProbed.add(family)
+    S.probeTried[family] = now
+    try { await $.store.set(PROBETRIED_KEY, S.probeTried) } catch { /* tried for this session only */ }
     const probed = await probeFamily($, family, alias)
     lines.push(probed.line)
     if (probed.started) started.push(family)
@@ -934,7 +952,7 @@ async function waitForProbes($: EngineInterface, families: readonly Family[], wa
   return true
 }
 
-// The session's model as the full id the caps know// The session's model as the full id the caps know, before a response was seen.
+// The session's model as the full id the caps know, before a response was seen.
 async function sessionStep($: EngineInterface): Promise<Step | undefined> {
   try {
     const family = familyOf(await $.session.model())
@@ -950,7 +968,7 @@ async function sessionStep($: EngineInterface): Promise<Step | undefined> {
 // support known), since the engine refuses a bare alias.
 const routableFamilies = (current: Step | undefined): Family[] =>
   (Object.keys(S.available.models) as Family[]).filter(family => {
-    if (S.failed.has(family)) return false
+    if (S.failed.has(family) || !allowed(family)) return false
     if (family === familyOf(current?.model)) return true
     const known = S.caps?.families[family]
     return Boolean(known?.id && known.ok && known.effort !== undefined)
@@ -1267,7 +1285,7 @@ async function toolCommand($: EngineInterface, raw: string): Promise<string> {
 async function clearLearnedData($: EngineInterface) {
   let removed = 0
   let failed = 0
-  for (const key of [CAPS_KEY, OUTPUTS_KEY, TURNLEN_KEY]) {
+  for (const key of [CAPS_KEY, OUTPUTS_KEY, TURNLEN_KEY, PROBETRIED_KEY]) {
     try {
       if ((await $.store.get(key)) !== undefined) {
         await $.store.delete(key)
@@ -1281,6 +1299,7 @@ async function clearLearnedData($: EngineInterface) {
   S.outputs = {}
   S.turnLengths = []
   S.autoProbed.clear()
+  S.probeTried = {}
   S.windows = {}
   clearConversation('manual-clear')
   return { removed, failed }
@@ -2046,7 +2065,7 @@ export const register: Register = (on, options) => {
         // The evidence starts over either way, so the next rung needs new trouble.
         S.signals.set(e.turnId, afterEscalation(signals))
         const effort = effortRung(pair)
-        const model = modelRung(pair, S.caps, S.failed)
+        const model = modelRung(pair, S.caps, new Set([...S.failed, ...(S.config.fableRouting ? [] : (['fable'] as const))]))
         let rung: Rung | undefined
         let by = 'none'
         let verdict: Awaited<ReturnType<typeof askAboutTrouble>>
@@ -2369,6 +2388,10 @@ export const register: Register = (on, options) => {
       const lines: string[] = []
       // One tiny background subagent per family not known yet.
       for (const [family, alias] of Object.entries(S.available.models) as [Family, string][]) {
+        if (!allowed(family)) {
+          lines.push(`${family}: not probed (Route to Fable is off)`)
+          continue
+        }
         if (isKnown(family)) {
           lines.push(`${family}: already known (${S.caps!.families[family]!.id})`)
           continue

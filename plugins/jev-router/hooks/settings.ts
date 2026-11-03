@@ -21,7 +21,7 @@ export type Spec = {
 
 export const SHARED: Record<string, Spec> = {
   // On the settings page.
-  feasibility_threshold: { where: 'page', kind: 'number', default: 0.6, min: 0, max: 1, what: 'A tier at an effort counts as able to do the work when Jev judges it at least this likely to complete it; the cheapest such pair runs' },
+  feasibility_threshold: { where: 'page', kind: 'number', default: 0.5, min: 0, max: 1, what: 'A tier at an effort counts as able to do the work when Jev judges it at least this likely to complete it; the cheapest such pair runs' },
   jev_context_enabled: { where: 'page', kind: 'boolean', default: true, what: 'Send Jev short excerpts of recent conversation so follow-ups are judged in context' },
   chat_notice: { where: 'page', kind: 'boolean', default: true, what: 'Add a line to the conversation, which you see and the model does not read, saying what Jev chose for each message (model and effort, skill, saved tool)' },
   skill_trim_hint: { where: 'page', kind: 'boolean', default: true, what: 'With skill selection on, at each session start say so while the skill listing is not trimmed (no description cap, or a project skill in full), and which command (/jev-skills opt) trims it; nothing is written' },
@@ -32,6 +32,7 @@ export const SHARED: Record<string, Spec> = {
   decision_routing: { where: 'page', kind: 'boolean', default: true, what: 'Let Claude automatically submit assistant-owned typed decisions to Jev throughout a task' },
   work_summary: { where: 'page', kind: 'boolean', default: true, what: 'Experimental. Send Jev a summary of the work in progress with each message: which tools ran lately and how many failed, the files edited and read (paths only, never contents), and how much is uncommitted in git. No code leaves your machine' },
   code_snippets: { where: 'page', kind: 'boolean', default: true, what: 'Experimental. Send Jev the gist of the code with each message, taken only from the conversation\'s own tool records: an outline of the files lately read or edited (what each is for and its type and method signatures) and short snippets (the text just edited, the end of a failed command, the start of a file Claude read). Keys and tokens are redacted and files that look like secrets are left out, but this is source code leaving your machine' },
+  fable_routing: { where: 'page', kind: 'boolean', default: false, what: 'Route to Fable, the tier above Opus. Off by default: it is the most expensive tier and may need usage credits beyond a subscription (on some accounts it answers "requires usage credits"). On: it is probed on first use and runs only when no cheaper pair is judged able' },
   escalation: { where: 'page', kind: 'choice', default: 'dry-run', options: ['off', 'dry-run', 'on'], what: 'Experimental. When tool calls keep failing within a turn, Jev diagnoses it (a larger model when it tried and was still wrong, more effort when it was not thorough enough) and the model or effort goes up for the steps that follow. dry-run only logs what it would do; it also needs model routing on' },
 
   // In $.store, set with /jev-model set.
@@ -93,6 +94,7 @@ export const sharedConfig = (page: Record<string, unknown>, store: Record<string
     },
     chatNotice: v('chat_notice') as boolean,
     workSummary: v('work_summary') as boolean,
+    fableRouting: v('fable_routing') as boolean,
     codeSnippets: v('code_snippets') as boolean,
     skillTrimHint: v('skill_trim_hint') as boolean,
     probeWaitMs: v('probe_wait_ms') as number,

@@ -353,7 +353,7 @@ describe('settings homes', () => {
     expect(before.feasibleThreshold).toBe(0.7)
     // A value in the wrong home is ignored.
     expect(sharedConfig({ effort_high: 'Page High' }).effortLevels.high).toBe(DEFAULT_EFFORT_LEVELS.high)
-    expect(sharedConfig({}, { feasibility_threshold: 0.7 }).feasibleThreshold).toBe(0.6)
+    expect(sharedConfig({}, { feasibility_threshold: 0.7 }).feasibleThreshold).toBe(0.5)
     expect(sharedConfig({ cost_horizon: 9 }).cost.horizon).toBe(0)
     expect(sharedConfig({}, { cost_horizon: 9, cost_tolerance: 0.1 }).cost).toEqual({ horizon: 9, tolerance: 0.1 })
     expect(sharedConfig({}, { effort_high: '' }).effortLevels.high).toBe(DEFAULT_EFFORT_LEVELS.high)
@@ -389,7 +389,7 @@ describe('settings homes', () => {
     await $.command.run({ command: 'jev-model', args: 'set feasibility_threshold 0.8' })
     await $.command.run({ command: 'jev-model', args: 'set model_opus My Architecture' })
     await $.command.run({ command: 'jev-model', args: 'defaults' })
-    expect(w.configRows.find(r => r.key.endsWith('.feasibility_threshold'))?.value).toBe(0.6)
+    expect(w.configRows.find(r => r.key.endsWith('.feasibility_threshold'))?.value).toBe(0.5)
     expect(saved.advanced).toBeUndefined()
     expect(w.sets.some(s => s.key.endsWith('.typesafe_api_key'))).toBe(false)
   })
