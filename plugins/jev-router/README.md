@@ -159,6 +159,36 @@ Jev chooses the model and effort once, when the prompt is sent. When the work th
 - **The switch.** `escalation` on the settings page: `off`, `dry-run` (the default: the step log's `escalation` field shows what it would have done and nothing is changed) or `on`. Switching also needs `model_routing` `on`. When it switches, the status line says `escalated to <family>/<effort> · <trigger>`.
 - **Limits.** The thresholds are first guesses with no data behind them; read the log in `dry-run` before turning it on. A trouble that is not a failed call (a wrong approach that runs without error) is not seen.
 
+### Measured choices (v0.7.1, 2026-11-03)
+
+Fourteen requests, from precise to vague to hard, each sent with `claude -p "<request>" --tools "" --max-turns 1 --no-session-persistence` so only Jev's judgement is exercised (no work history, no tool calls; the conversation is a single message). Threshold 0.5, `fable_routing` off, session model Sonnet. Ratings are Jev's feasibility for the low to max efforts (`low/medium/high/xhigh/max`); the pick is the cheapest pair at or above 0.5.
+
+| # | Kind | Request (translated) | Haiku | Sonnet | Pick |
+|---|---|---|---|---|---|
+| 1 | precise | Change the comment above `LoginService.SignIn` from Chinese to English, touch nothing else | .82 .87 .87 .87 .88 | .90 .93 .95 .95 .95 | **Haiku / low** |
+| 2 | precise | Rename the constant `MAX_RETRY` to `MaxRetryCount` in `Config.cs`, with every use | .80 .84 .83 .82 .85 | .89 .92 .94 .95 .96 | **Haiku / low** |
+| 3 | precise | Add one line to the install section of `README.md` | .93 .93 .93 .94 .95 | .96 .96 .97 .97 .98 | **Haiku / low** |
+| 4 | clear, small feature | Add `SignOut` to `LoginService` with two NUnit tests and a mocked `IAuthApi` | .40 .56 .60 .52 .62 | .81 .88 .91 .91 .93 | **Haiku / medium** |
+| 5 | clear, refactor | Fold three near-identical `ShowPopup` methods into one generic method, behaviour unchanged, run the EditMode tests | .22 .37 .39 .37 .43 | .58 .78 .86 .83 .86 | **Sonnet / low** |
+| 6 | question | Explain which thread async/await returns to in Unity and why it hangs in a unit test | .56 .59 .58 .58 .61 | .82 .85 .87 .89 .90 | **Haiku / low** |
+| 7 | vague | "Something looks off around login, take a look." | .13 .19 .21 .24 .26 | .28 .43 .49 .57 .61 | **Sonnet / xhigh** |
+| 8 | vague | "The game stutters sometimes, find out why." | .13 .19 .18 .23 .24 | .37 .49 .44 .58 .57 | **Sonnet / xhigh** |
+| 9 | vague | "The architecture feels messy, what do you think?" | .15 .19 .18 .20 .29 | .44 .54 .67 .67 .79 | **Sonnet / medium** |
+| 10 | vague | "Make it faster." | .11 .15 .16 .20 .19 | .19 .23 .27 .34 .37 | **Sonnet / xhigh** (none feasible: most capable pair near the best rating) |
+| 11 | hard bug | Double balance deduction after a SignalR reconnect on a mobile to Wi-Fi switch only; find the root cause and a fix that keeps event order | .06 .11 .13 .14 .15 | .24 .40 .54 .62 .67 | **Sonnet / high** |
+| 12 | hard design | Client offline queue vs server-authoritative balance: optimistic UI, rollback, idempotent resend, UTC+8, app killed and restarted | .04 .08 .10 .12 .12 | .22 .49 .66 .72 .73 | **Sonnet / high** |
+| 13 | hard migration | Rewrite the whole Addressables layer from coroutines to UniTask, about 80 files, load order unchanged, no deadlock; plan and risks first | .02 .05 .05 .06 .07 | .09 .22 .46 .43 .51 | **Sonnet / max** |
+| 14 | hard, unfamiliar | IL2CPP on ARM64 reads stale data from a lock-free ring buffer; analyse the memory-ordering cause and write a correct one | .07 .13 .14 .19 .16 | .28 .45 .62 .67 .70 | **Sonnet / high** |
+
+What the run shows:
+
+- **Haiku** is picked for precise edits, a mechanical rename and a plain question, at low effort; a clear small feature with tests needs medium. Jev's ratings fall steadily as the work gets less certain (precise .8 to .9, a refactor .2 to .4, hard work .02 to .15).
+- **Sonnet** takes everything Haiku cannot: refactors, vague requests and hard problems. The more open or the harder the request, the higher the effort it needs to clear the threshold, up to xhigh for vague ones and max for the 80-file migration.
+- **Opus was never picked.** Jev rated Opus the same as Sonnet in every row (identical in nine of the fourteen, and at most 0.12 higher in the others, where it crossed 0.5 at a lower effort than Sonnet but still cost more), and Opus costs more, so the cheapest able pair was always Sonnet. Opus is reached only when Sonnet's ratings fall under the threshold and Opus's do not; in this set no request opened that gap. On the hardest request (#13, Sonnet max .51) a slightly stricter threshold would have moved it to Opus, and in the none-feasible case (#10) the router already takes the best-rated pair.
+- **Fable** could not be tested. It is off by default, this account needs usage credits for it, and a headless run with tools off cannot start the probe subagent (`no tool named "Agent"`), so it was never asked about.
+- **Vague requests** were not sent to Haiku in this run, unlike the vaguer prompt of an earlier test (Haiku medium .51 on a read-only look at the login code with a few tool calls of history). With history the work facts change the ratings, so repeat the check in a live session as well.
+- Effort rises with uncertainty: precise requests resolve at low, vague and hard ones at high to max. Ratings across efforts are close to flat (a few hundredths), so the effort picked is often where a rating crosses 0.5, not a sharp preference.
+
 ## Costs
 
 ### Pair cost
