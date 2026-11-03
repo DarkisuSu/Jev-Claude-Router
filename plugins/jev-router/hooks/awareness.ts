@@ -12,6 +12,12 @@ import type { WorkFacts } from './work'
 export const STATE_CHAR_BUDGET = 24000
 export const STATE_RESERVE = 3000
 
+// How Jev is to tell what a tier and an effort each add, as Anthropic describes them for
+// Claude Code: the tier is how capable, the effort is how thorough. Sent once, in the
+// routing facts, so the questions stay short.
+export const JUDGING =
+  'The tier sets how capable the model is; the effort sets how thorough it is. A tier is able when it can solve the problem itself: subtle bugs, unfamiliar domains, architecture decisions and ambiguous requests need a more capable tier. A precisely described edit or a mechanical change is within a smaller tier even at low effort; work where checks matter (tests, many files) needs more effort.'
+
 export type AwarenessConfig = { enabled: boolean; maxChars: number; messages: number }
 export type MessageLike = { role?: unknown; text?: unknown; toolUses?: unknown; toolResults?: unknown; agentId?: unknown; type?: unknown }
 export type RecentContext = { text: string; messages: number; source: 'session-excerpts' | 'unavailable' | 'disabled'; truncated: boolean }
@@ -103,6 +109,7 @@ export const routingFacts = (state: CacheState, current: Step | undefined, caps:
       per_tier: capacity,
       note: 'A tier whose context window is smaller than the conversation cannot run it. largest_context_answered is the biggest context a response on that tier came back over; context_window_reported comes from Claude Code for the session model only. null means no evidence either way.',
     },
+    judging: JUDGING,
     previous_attempt: attempt ?? null,
     ...(work ? { work } : {}),
     answer_correctness_verified: 'unknown',

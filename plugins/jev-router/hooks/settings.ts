@@ -32,12 +32,13 @@ export const SHARED: Record<string, Spec> = {
   decision_routing: { where: 'page', kind: 'boolean', default: true, what: 'Let Claude automatically submit assistant-owned typed decisions to Jev throughout a task' },
   work_summary: { where: 'page', kind: 'boolean', default: true, what: 'Experimental. Send Jev a summary of the work in progress with each message: which tools ran lately and how many failed, the files edited and read (paths only, never contents), and how much is uncommitted in git. No code leaves your machine' },
   code_snippets: { where: 'page', kind: 'boolean', default: true, what: 'Experimental. Send Jev the gist of the code with each message, taken only from the conversation\'s own tool records: an outline of the files lately read or edited (what each is for and its type and method signatures) and short snippets (the text just edited, the end of a failed command, the start of a file Claude read). Keys and tokens are redacted and files that look like secrets are left out, but this is source code leaving your machine' },
-  escalation: { where: 'page', kind: 'choice', default: 'dry-run', options: ['off', 'dry-run', 'on'], what: 'Experimental. When tool calls keep failing within a turn, raise the effort (then the model) for the steps that follow. dry-run only logs what it would do; it also needs model routing on' },
+  escalation: { where: 'page', kind: 'choice', default: 'dry-run', options: ['off', 'dry-run', 'on'], what: 'Experimental. When tool calls keep failing within a turn, Jev diagnoses it (a larger model when it tried and was still wrong, more effort when it was not thorough enough) and the model or effort goes up for the steps that follow. dry-run only logs what it would do; it also needs model routing on' },
 
   // In $.store, set with /jev-model set.
   model_haiku: { where: 'store', kind: 'text', default: DEFAULT_MODEL_CRITERIA.haiku!, what: 'What Jev is told Haiku work is' },
   model_sonnet: { where: 'store', kind: 'text', default: DEFAULT_MODEL_CRITERIA.sonnet!, what: 'What Jev is told Sonnet work is' },
   model_opus: { where: 'store', kind: 'text', default: DEFAULT_MODEL_CRITERIA.opus!, what: 'What Jev is told Opus work is' },
+  model_fable: { where: 'store', kind: 'text', default: DEFAULT_MODEL_CRITERIA.fable!, what: 'What Jev is told Fable work is' },
   ...Object.fromEntries(EFFORTS.map(e => [`effort_${e}`, { where: 'store', kind: 'text', default: DEFAULT_EFFORT_LEVELS[e], what: `What Jev is told ${e} effort means` } satisfies Spec])),
   cache_min_tokens: { where: 'store', kind: 'number', default: 20000, min: 0, max: 10000000, integer: true, what: 'Context size from which a well-read cache is labelled hot in the logs' },
   cache_min_hit_ratio: { where: 'store', kind: 'number', default: 0.8, min: 0, max: 1, what: 'Share of input read from cache from which the cache is labelled hot' },
@@ -108,7 +109,7 @@ export const sharedConfig = (page: Record<string, unknown>, store: Record<string
     feasibleThreshold: v('feasibility_threshold') as number,
     autoProbe: v('auto_probe') as boolean,
     tierMonotonic: v('tier_monotonic') as boolean,
-    modelDescriptions: Object.fromEntries(['haiku', 'sonnet', 'opus'].map(f => [f, String(v(`model_${f}`))])),
+    modelDescriptions: Object.fromEntries(['haiku', 'sonnet', 'opus', 'fable'].map(f => [f, String(v(`model_${f}`))])),
     effortLevels: Object.fromEntries(EFFORTS.map(e => [e, String(v(`effort_${e}`))])) as Record<Effort, string>,
     cache: {
       minTokens: v('cache_min_tokens'),

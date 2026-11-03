@@ -6,7 +6,7 @@ import type { On } from 'claude-code'
 
 import { FAKE_KEY, PROMPT, logLines, rankWide, rerank, world, type World } from './testkit'
 import { rankWideBody } from './router'
-import { availableFrom, decide, learn, monotonic, planStep } from './model'
+import { FAMILIES, availableFrom, decide, familyOf, learn, monotonic, planStep } from './model'
 
 // Full ids as the engine resolves them; the router never sends a bare alias.
 const SONNET = 'claude-sonnet-test-id'
@@ -147,8 +147,8 @@ describe('model routing', () => {
     await step($, 't1', 0)
 
     const questions = JSON.parse(w.fetches[0]?.body ?? '{}').questions
-    expect(questions['feasible::opus::xhigh'].instructions).toContain('Deeper reasoning than high')
-    expect(questions['feasible::opus::max'].instructions).toContain('most thorough reasoning')
+    expect(questions['feasible::opus::xhigh'].instructions).toContain('Deeper than high')
+    expect(questions['feasible::opus::max'].instructions).toContain('most thorough the model offers')
     // Both clear the threshold; the cheaper (xhigh) runs.
     expect(seen[0]).toEqual({ model: OPUS, effort: 'xhigh', agentId: undefined })
     const round = logLines(w).find(l => l.type === 'round')!
@@ -217,7 +217,7 @@ describe('model routing', () => {
     expect(questions['feasible::opus::low'].instructions).toContain('my low')
     expect(questions['feasible::opus::high'].instructions).toContain('my high')
     // An unset level keeps its default.
-    expect(questions['feasible::opus::medium'].instructions).toContain('Moderate reasoning')
+    expect(questions['feasible::opus::medium'].instructions).toContain('Moderate thoroughness')
   })
 
   test('on: a tier whose full id has not been learned is neither asked nor sent', { options: { typesafe_api_key: FAKE_KEY, skill_routing: true, tool_routing: true, write_log: true, model_routing: 'on' } }, async ($, on) => {
@@ -619,7 +619,7 @@ describe('reset to defaults', () => {
 describe('model policy', () => {
   test('the routable models come from the build\'s own list, special variants left out', () => {
     const a = availableFrom([{ key: 'model', label: 'Model', kind: 'choice', value: 'sonnet', options: ['default', 'sonnet[1m]', 'sonnet', 'opusplan', 'opus', 'haiku', 'fable', 'best'] }])
-    expect(a.models).toEqual({ haiku: 'haiku', sonnet: 'sonnet', opus: 'opus' })
+    expect(a.models).toEqual({ haiku: 'haiku', sonnet: 'sonnet', opus: 'opus', fable: 'fable' })
   })
 
   test('no model row means nothing is routable', () => {
@@ -769,6 +769,7 @@ describe('a bigger tier is never rated below a smaller one', () => {
     const q = asked['feasible::opus::high']!.instructions
     expect(q).toContain('A more capable tier can do everything a less capable one can')
     expect(q).toContain('Anything a smaller tier can complete, it can complete too.')
+    expect(q).toContain('routing_context.judging')
     expect(asked['feasible::sonnet::high']!.instructions).toContain('It can do everything the smaller tier can')
   })
 })
@@ -905,5 +906,118 @@ describe('escalating when the work goes wrong', () => {
     await step($, 't2', 0)
 
     expect(sent(seen)).toEqual([`${OPUS}/medium`, `${OPUS}/high`, `${OPUS}/medium`])
+  })
+})
+
+describe('Fable, the tier above Opus', () => {
+  test('it is routable when the Model row lists it, and its special variants are not', () => {
+    const a = availableFrom([{ key: 'model', label: 'Model', kind: 'choice', value: 'sonnet', options: ['default', 'sonnet', 'opus', 'haiku', 'fable', 'best', 'fable[1m]', 'opusplan'] }])
+    expect(a.models.fable).toBe('fable')
+    expect(availableFrom([{ key: 'model', label: 'Model', kind: 'choice', value: 'sonnet', options: ['sonnet', 'fable[1m]'] }]).models.fable).toBeUndefined()
+  })
+
+  test('a full id names its family, and Fable is above Opus in the ordering', () => {
+    expect(familyOf('claude-fable-5-1')).toBe('fable')
+    expect(FAMILIES.indexOf('fable')).toBeGreaterThan(FAMILIES.indexOf('opus'))
+  })
+
+  test('a bigger tier is never rated below a smaller one, Fable included', () => {
+    const out = monotonic({ opus: { high: 0.6 }, fable: { high: 0.4 }, sonnet: { high: 0.8 } })
+    expect(out.fable!.high).toBe(0.8)
+    expect(out.opus!.high).toBe(0.8)
+  })
+
+  test('with no known price Fable costs last: Opus runs when it is feasible, Fable only when nothing cheaper is', () => {
+    const cost = (family: string) => ({ usd: family === 'fable' ? undefined : 1, rank: undefined })
+    const both = decide('r', { opus: { high: 0.9 }, fable: { high: 0.95 } }, ['opus', 'fable'] as never, cost as never, 0.6, 0)
+    expect(both.family).toBe('opus')
+    const only = decide('r', { opus: { high: 0.3 }, fable: { high: 0.9 } }, ['opus', 'fable'] as never, cost as never, 0.6, 0)
+    expect(only.family).toBe('fable')
+  })
+})
+
+describe('Jev decides how to escalate', () => {
+  const ESC = { ...ON, escalation: 'on' }
+  const FABLE = 'claude-fable-test-id'
+  const WITH_FABLE = { caps: { ...CAPS, families: { ...CAPS.families, fable: { id: FABLE, ok: true, effort: true, at: '' } } } }
+
+  const tools = (on: On) => {
+    on('tool.call', async (_$, e) => ({ isError: String((e as { command?: unknown }).command ?? '').startsWith('fail') ? true : undefined, result: 'x' }) as never)
+  }
+  const trouble = async ($: Engine) => {
+    for (const command of ['fail one', 'fail two', 'fail three']) await $.tool.call({ tool: 'Bash', command } as never)
+  }
+  // Jev's answer to the trouble question, or an error; the rest as for routing.
+  const jev = (change: Record<string, number> | 'broken') => (q: Record<string, unknown>) =>
+    'change' in q
+      ? change === 'broken'
+        ? { status: 500, body: {} }
+        : { status: 200, body: { model: 'jev-test-1', answers: { change: { type: 'choice', choice: Object.keys(change)[0], probabilities: change, confidence: 0.8 } }, usage: { input_tokens: 300, output_tokens: 5 } } }
+      : answers({ 'opus::medium': 0.9 })(q)
+  const sent = (seen: Seen[]) => seen.map(s => `${s.model}/${String(s.effort)}`)
+  const asked = (w: World) => w.fetches.map(f => JSON.parse(f.body)).find(b => b.questions && 'change' in b.questions)
+  const run = async ($: Engine, on: On, change: Record<string, number> | 'broken', store: object = { caps: CAPS }) => {
+    mock.clock(on)
+    mock.store(on, store)
+    const w = world(on, jev(change))
+    const seen = bottom(on)
+    tools(on)
+    await turn($, w)
+    await step($, 't1', 0)
+    await trouble($)
+    await step($, 't1', 1)
+    await step($, 't1', 2)
+    return { w, seen }
+  }
+
+  test('Jev says the model lacked thoroughness: the effort goes up', { options: ESC }, async ($, on) => {
+    const { w, seen } = await run($, on, { more_effort: 0.7, larger_model: 0.2, no_change: 0.1 }, WITH_FABLE)
+    expect(sent(seen)).toEqual([`${OPUS}/medium`, `${OPUS}/high`, `${OPUS}/high`])
+    expect(steps(w).map(s => s.escalation).find(Boolean)).toMatchObject({ trigger: 'failures', by: 'jev', kind: 'effort', jev: { choice: 'more_effort' }, live: true })
+  })
+
+  test('Jev says the model tried and was still wrong: the next larger model runs', { options: ESC }, async ($, on) => {
+    const { w, seen } = await run($, on, { larger_model: 0.8, more_effort: 0.1, no_change: 0.1 }, WITH_FABLE)
+    expect(sent(seen)).toEqual([`${OPUS}/medium`, `${FABLE}/high`, `${FABLE}/high`])
+    expect(steps(w).map(s => s.escalation).find(Boolean)).toMatchObject({ by: 'jev', kind: 'model', jev: { choice: 'larger_model' } })
+  })
+
+  test('Jev says the failures are ordinary: nothing changes', { options: ESC }, async ($, on) => {
+    const { w, seen } = await run($, on, { no_change: 0.8, more_effort: 0.1, larger_model: 0.1 }, WITH_FABLE)
+    expect(sent(seen)).toEqual([`${OPUS}/medium`, `${OPUS}/medium`, `${OPUS}/medium`])
+    expect(steps(w).map(s => s.escalation).find(Boolean)).toMatchObject({ by: 'jev', kind: 'none', jev: { choice: 'no_change' } })
+  })
+
+  test('without an answer from Jev the cheaper rung, more effort, is taken', { options: ESC }, async ($, on) => {
+    const { w, seen } = await run($, on, 'broken')
+    expect(sent(seen)).toEqual([`${OPUS}/medium`, `${OPUS}/high`, `${OPUS}/high`])
+    expect(steps(w).map(s => s.escalation).find(Boolean)).toMatchObject({ by: 'fallback', kind: 'effort' })
+  })
+
+  test('Jev is told the request, the counts and Anthropic\'s diagnosis, and offered only the options that exist', { options: ESC }, async ($, on) => {
+    const { w } = await run($, on, { more_effort: 0.6, no_change: 0.4 })
+    const body = asked(w)
+    expect(body.state.request).toBe(PROMPT)
+    expect(body.state.escalation).toMatchObject({ trigger: 'failures', failed_calls_in_a_row: 3, current: { effort: 'medium' } })
+    expect(body.questions.change.instructions).toContain('clearly tried but was still wrong')
+    expect(body.questions.change.instructions).toContain('did not try hard enough')
+    // No larger model is known here, so it is not offered.
+    expect(Object.keys(body.questions.change.criteria)).toEqual(['no_change', 'more_effort'])
+  })
+
+  test('with a larger model known, all three options are offered', { options: ESC }, async ($, on) => {
+    const { w } = await run($, on, { more_effort: 0.6, no_change: 0.4 }, WITH_FABLE)
+    expect(Object.keys(asked(w).questions.change.criteria)).toEqual(['no_change', 'more_effort', 'larger_model'])
+  })
+
+  test('dry-run asks Jev too, and records the answer without switching', { options: { ...ESC, escalation: 'dry-run' } }, async ($, on) => {
+    const { w, seen } = await run($, on, { larger_model: 0.8, more_effort: 0.1, no_change: 0.1 }, WITH_FABLE)
+    expect(sent(seen)).toEqual([`${OPUS}/medium`, `${OPUS}/medium`, `${OPUS}/medium`])
+    expect(steps(w).map(s => s.escalation).find(Boolean)).toMatchObject({ by: 'jev', jev: { choice: 'larger_model' }, live: false })
+  })
+
+  test('what Jev is sent about the work follows the switches: no code with sharing off', { options: { ...ESC, jev_context_enabled: false } }, async ($, on) => {
+    const { w } = await run($, on, { more_effort: 0.6, no_change: 0.4 })
+    expect(asked(w).state.escalation.work).toBeUndefined()
   })
 })

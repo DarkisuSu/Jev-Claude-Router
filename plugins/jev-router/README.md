@@ -103,6 +103,8 @@ These are the [TypeSafe primitives](https://docs.typesafe.ai/primitives). The to
 
 Jev judges one thing per question: whether a tier at an effort can do the work. The router does the cost arithmetic and picks. The questions ride the same rank_wide request as the skill ranking, so model routing adds no Jev call.
 
+**How a tier and an effort are described to Jev** follows Anthropic's guidance for Claude Code ("Claude model and effort level in Claude Code"): the model is how capable, the effort is how thorough. A larger tier is for subtle bugs, unfamiliar domains, architecture decisions and ambiguous work; a smaller one is for precisely described edits, mechanical changes and routine work, where it is also cheaper. Effort covers all the work, not only the thinking: how much is read, how much is checked, how far it goes before it reports back. The state carries one short text (`routing_context.judging`) that says so, and the default descriptions of the three tiers and five efforts are worded that way (change them with `/jev-model set model_<tier>` and `effort_<level>`). The wording was tuned against the real Jev: a precisely described rename must still rate feasible for the smallest tier at low effort, and a cross-layer design question must not, which a longer text or a low effort described as "would rather ask for more context" broke. **Fable.** The article names a tier above Opus, the most capable and the most expensive, saved for work the others cannot finish at any effort. The Model row lists it at initialization (`fable`, `fable[1m]`), so it is a fourth tier like the others: it is asked about, probed once on first use (the first message waits for that, as for any new tier) and ordered last. Its price is not in the router's table, so its cost is unknown and an unknown cost sorts after every known one: Fable runs only when no cheaper pair is judged able.
+
 | Question | Type | Judges |
 |---|---|---|
 | `feasible::<tier>::<effort>` | Noul, one per routable tier and effort (up to 15) | Whether that tier at that effort can reliably complete the request, apart from cost |
@@ -146,10 +148,10 @@ Only when all of these hold. Otherwise the step goes as the engine resolved it, 
 
 ### Escalating when the work goes wrong (experimental)
 
-Jev chooses the model and effort once, when the prompt is sent. When the work then goes badly inside the turn, the router can raise the pair for the steps that follow, without waiting for the next message. It watches the tool calls of the turn and no one is asked: nothing leaves your machine for this.
+Jev chooses the model and effort once, when the prompt is sent. When the work then goes badly inside the turn, the router can raise the pair for the steps that follow, without waiting for the next message. It watches the tool calls of the turn; the counting happens here. Only when trouble shows does the router ask Jev, once, what to change.
 
 - **What counts as trouble.** Failed `Bash`, `PowerShell`, `Edit` or `Write` calls in a row (`escalate_failures`, 3); the same command or file operation failing again (`escalate_repeats`, 3). A failed `Read`, `Grep` or search is ordinary searching and counts for nothing, and neither does a call you refused. Editing one file again and again is not counted either: while features are being built that is ordinary progress, so it says nothing about trouble.
-- **What it does.** One rung up: the next effort level, and at `max` the next family (only one seen answering with its full id, started at `high`). The rung becomes the floor for the rest of the turn: later steps are never lower. After an escalation the evidence starts over, and a turn climbs at most `escalate_max` (2) rungs. A new message starts clean and Jev judges it again.
+- **What it does.** Jev decides which way to go, with Anthropic's diagnosis in the question: if the model had the context and clearly tried but was still wrong, a larger model (the next family, only one seen answering with its full id, started at `high`); if it did not try hard enough (skipped a file, did not run the tests, did not double-check), more effort (the next level); if the failures are ordinary and the work is moving, no change. Jev is offered only the options that exist (no larger model known, or effort already at `max`, leaves that one out) and sees the request, the counts and, as far as the sharing switches above allow, the recent tool activity, the end of the failed outputs and the code at hand. With no answer in five seconds, or none that can be read, the cheaper rung (more effort) is taken. The step log's `escalation` field records the trigger, who decided (`jev` or `fallback`) and Jev's probabilities. The rung becomes the floor for the rest of the turn: later steps are never lower. After an escalation the evidence starts over, and a turn climbs at most `escalate_max` (2) rungs. A new message starts clean and Jev judges it again.
 - **The switch.** `escalation` on the settings page: `off`, `dry-run` (the default: the step log's `escalation` field shows what it would have done and nothing is changed) or `on`. Switching also needs `model_routing` `on`. When it switches, the status line says `escalated to <family>/<effort> · <trigger>`.
 - **Limits.** The thresholds are first guesses with no data behind them; read the log in `dry-run` before turning it on. A trouble that is not a failed call (a wrong approach that runs without error) is not seen.
 
@@ -271,7 +273,7 @@ The rest are kept off the page, saved in `$.store`, and changed with `/jev-model
 
 | Name | Default | Range |
 |---|---|---|
-| `model_haiku` / `model_sonnet` / `model_opus` | see `/jev-model settings` | up to 500 characters |
+| `model_haiku` / `model_sonnet` / `model_opus` / `model_fable` | see `/jev-model settings` | up to 500 characters |
 | `tier_monotonic` | true | true / false |
 | `effort_low` / `effort_medium` / `effort_high` / `effort_xhigh` / `effort_max` | see `/jev-model settings` | up to 500 characters |
 | `cache_min_tokens` | 20000 | 0 to 10000000 |

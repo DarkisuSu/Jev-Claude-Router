@@ -20,7 +20,7 @@ import {
   type Effort,
 } from './model'
 import { horizonFor, learnOutput, median, normalizeStats, outputSummary, pairCost, type OutputStats } from './cost'
-import { ENDPOINT, saveQuestion } from './questions'
+import { ENDPOINT, ESCALATION_TIMEOUT_MS, saveQuestion, type EscalationOption } from './questions'
 import {
   SAVE_DESCRIPTION,
   SAVE_SCHEMA,
@@ -42,12 +42,12 @@ import {
 } from './tools'
 import { cacheAdvice, cacheEvidence, observeUsage, resetCache, withContext, type CacheState, type CacheAdvice, type UsageLike } from './cache'
 import { SHARED, parseSetting, settingValue, sharedConfig } from './settings'
-import { JevError, route, type RouteResult, type Send } from './router'
+import { JevError, askEscalation, escalationBody, route, type RouteResult, type Send } from './router'
 import { EMPTY_ATTEMPT, STATE_CHAR_BUDGET, STATE_RESERVE, recentContext, routingFacts, scrubText, type AttemptFacts } from './awareness'
 import { DESC_CAP, applyOpt, capOf, hiddenNames, overridesOf } from './hide'
 import { codeOutline } from './outline'
 import { codeSnippets, composeWork, parseGit, workFacts, type GitFacts } from './work'
-import { afterEscalation, emptySignals, nextRung, noteCall, raise, triggered, type Pair, type Signals } from './escalate'
+import { afterEscalation, effortRung, emptySignals, modelRung, noteCall, raise, triggered, type Pair, type Rung, type Signals } from './escalate'
 import { DECISION_TOOL, DECISION_DESCRIPTION, DECISION_SCHEMA, decisionText, prepareDecision, evaluateDecision } from './decisions'
 import {
   assembleIndex,
@@ -271,6 +271,8 @@ const S: {
   // the floor for its later steps.
   signals: Map<string, Signals>
   floors: Map<string, Pair>
+  // The request each running turn began with, for asking Jev about trouble in it.
+  turnText: Map<string, string>
   lastAttempt?: AttemptFacts
   mainTurn?: string
 } = {
@@ -301,6 +303,7 @@ const S: {
   attempts: new Map(),
   signals: new Map(),
   floors: new Map(),
+  turnText: new Map(),
 }
 
 // Conversation facts never go to $.store. session.end fires on clear/resume;
@@ -321,6 +324,7 @@ function clearConversation(why: string, sessionId?: string) {
   S.attempts.clear()
   S.signals.clear()
   S.floors.clear()
+  S.turnText.clear()
   S.lastAttempt = undefined
   S.mainTurn = undefined
 }
@@ -560,6 +564,38 @@ async function skillTrimHint($: EngineInterface) {
     if (S.config.chatNotice) await chatNotice($, text)
   } catch {
     // A hint only.
+  }
+}
+
+// Trouble inside a turn: ask Jev which way to go, with the evidence at hand (the
+// counts always; the tool activity and the code only where those switches and
+// the sharing of recent context allow). Anything that goes wrong (no key, a
+// timeout, an unreadable answer) is no answer, and the caller falls back.
+async function askAboutTrouble($: EngineInterface, turnId: string, trigger: string, signals: Signals, pair: Pair, offered: EscalationOption[]) {
+  const c = S.config
+  if (!c.key) return undefined
+  try {
+    const started = await $.clock.now()
+    const sharing = c.awareness.enabled
+    let messages
+    if (sharing && (c.workSummary || c.codeSnippets)) {
+      try { messages = await $.session.messages() } catch { /* no evidence beyond the counts */ }
+    }
+    const work = sharing
+      ? composeWork(c.workSummary ? workFacts(messages, undefined) : undefined, c.codeSnippets ? codeSnippets(messages, [c.key]) : [], c.codeSnippets ? codeOutline(messages, [c.key]) : [])
+      : undefined
+    const facts = {
+      trigger,
+      current: { model: familyOf(pair.model) ?? pair.model, effort: pair.effort ?? null },
+      failed_calls_in_a_row: signals.consecutive,
+      most_failures_of_one_operation: Math.max(0, ...Object.values(signals.repeats)),
+      ...(work ? { work } : {}),
+    }
+    const body = escalationBody(S.turnText.get(turnId) ?? '', facts, offered, c.model)
+    const reply = await askEscalation(sender($, started + ESCALATION_TIMEOUT_MS), () => $.clock.now(), body)
+    return { ...reply, ms: (await $.clock.now()) - started }
+  } catch {
+    return undefined
   }
 }
 
@@ -1896,6 +1932,7 @@ export const register: Register = (on, options) => {
     S.attempts.set(e.turnId, { ...EMPTY_ATTEMPT })
     S.signals.set(e.turnId, emptySignals())
     S.floors.delete(e.turnId)
+    S.turnText.set(e.turnId, scrubText(String((e as { text?: unknown }).text ?? ''), [config.key]).slice(0, 2000))
     while (S.attempts.size > KEPT_TURNS) {
       const oldest = S.attempts.keys().next().value
       if (oldest === undefined) break
@@ -2008,10 +2045,34 @@ export const register: Register = (on, options) => {
       if (trigger) {
         // The evidence starts over either way, so the next rung needs new trouble.
         S.signals.set(e.turnId, afterEscalation(signals))
-        const rung = nextRung(pair, S.caps, S.failed)
-        escalation = rung
-          ? { trigger, kind: rung.kind, from_model: pair.model, from_effort: pair.effort, to_model: rung.pair.model, to_effort: rung.pair.effort, live }
-          : { trigger, kind: 'top', from_model: pair.model, from_effort: pair.effort, live }
+        const effort = effortRung(pair)
+        const model = modelRung(pair, S.caps, S.failed)
+        let rung: Rung | undefined
+        let by = 'none'
+        let verdict: Awaited<ReturnType<typeof askAboutTrouble>>
+        if (effort || model) {
+          // Jev diagnoses it (Anthropic's guidance: tried but wrong, a larger model; not
+          // thorough enough, more effort). Without an answer the cheaper rung is taken.
+          const offered: EscalationOption[] = ['no_change', ...(effort ? ['more_effort' as const] : []), ...(model ? ['larger_model' as const] : [])]
+          verdict = await askAboutTrouble($, e.turnId, trigger, signals, pair, offered)
+          if (verdict) {
+            by = 'jev'
+            rung = verdict.choice === 'more_effort' ? effort : verdict.choice === 'larger_model' ? model : undefined
+          } else {
+            by = 'fallback'
+            rung = effort ?? model
+          }
+        }
+        escalation = {
+          trigger,
+          by,
+          ...(verdict ? { jev: { choice: verdict.choice, probabilities: verdict.probabilities, ms: verdict.ms } } : {}),
+          kind: rung ? rung.kind : effort || model ? 'none' : 'top',
+          from_model: pair.model,
+          from_effort: pair.effort,
+          ...(rung ? { to_model: rung.pair.model, to_effort: rung.pair.effort } : {}),
+          live,
+        }
         if (rung && live) {
           S.floors.set(e.turnId, rung.pair)
           pair = rung.pair
@@ -2195,6 +2256,7 @@ export const register: Register = (on, options) => {
     S.stepCounts.delete(e.turnId)
     S.signals.delete(e.turnId)
     S.floors.delete(e.turnId)
+    S.turnText.delete(e.turnId)
     if (requests) {
       S.turnLengths = [...S.turnLengths, requests].slice(-KEPT_TURN_LENGTHS)
       try {

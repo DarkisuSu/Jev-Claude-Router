@@ -62,19 +62,25 @@ const MODEL_STEP_EFFORT = 'high'
 // One rung up from the pair: the next effort level while the model takes
 // effort, then the next family (a switch only to a family seen answering with
 // its full id, as for Jev's own choice). None at the top.
-export const nextRung = (current: Pair, caps: Caps | undefined, failed: ReadonlySet<Family>): Rung | undefined => {
+export const effortRung = (current: Pair, caps?: Caps): Rung | undefined => {
   const family = familyOf(current.model)
   const known = family ? caps?.families[family] : undefined
-  if (isEffort(current.effort) && known?.effort !== false) {
-    const at = EFFORTS.indexOf(current.effort)
-    if (at < EFFORTS.length - 1) return { pair: { model: current.model, effort: EFFORTS[at + 1] }, kind: 'effort' }
-  }
+  if (!isEffort(current.effort) || known?.effort === false) return undefined
+  const at = EFFORTS.indexOf(current.effort)
+  return at < EFFORTS.length - 1 ? { pair: { model: current.model, effort: EFFORTS[at + 1] }, kind: 'effort' } : undefined
+}
+
+// The next family up, if it was seen answering with its full id and is not failed.
+export const modelRung = (current: Pair, caps: Caps | undefined, failed: ReadonlySet<Family>): Rung | undefined => {
+  const family = familyOf(current.model)
   const larger = family ? FAMILIES[FAMILIES.indexOf(family) + 1] : undefined
   if (!larger || failed.has(larger)) return undefined
   const target = caps?.families[larger]
   if (!target?.id || !target.ok || target.effort === undefined) return undefined
   return { pair: { model: target.id, effort: target.effort ? MODEL_STEP_EFFORT : undefined }, kind: 'model' }
 }
+
+export const nextRung = (current: Pair, caps: Caps | undefined, failed: ReadonlySet<Family>): Rung | undefined => effortRung(current, caps) ?? modelRung(current, caps, failed)
 
 const rank = (model: string) => {
   const family = familyOf(model)

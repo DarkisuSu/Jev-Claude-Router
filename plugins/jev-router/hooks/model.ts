@@ -1,7 +1,7 @@
 // Model routing policy, pure: which model and effort one main-loop request
 // is sent with. register.ts supplies the facts (`$` is used there alone).
 
-export const FAMILIES = ['haiku', 'sonnet', 'opus'] as const
+export const FAMILIES = ['haiku', 'sonnet', 'opus', 'fable'] as const
 export type Family = (typeof FAMILIES)[number]
 
 // The effort levels Claude Code names, low to max. Fixed here: a mod cannot

@@ -7,11 +7,14 @@ import {
   RANK_WIDE_INSTRUCTIONS,
   RERANK_INSTRUCTIONS,
   TOOL_MATCH_QUESTION,
+  ESCALATION_INSTRUCTIONS,
+  ESCALATION_OPTIONS,
   catalogLines,
   fitsQuestion,
   feasibleQuestion,
   toolQuestion,
   DEFAULT_MODEL_CRITERIA,
+  type EscalationOption,
   type Questions,
 } from './questions'
 import { EFFORTS, FAMILIES, monotonic, type Effort, type Feasible } from './model'
@@ -49,7 +52,7 @@ export type RouteConfig = {
 export type Send = (body: string) => Promise<{ status: number; text: string }>
 
 export type CallRecord = {
-  step: 'rank_wide' | 'rerank'
+  step: 'rank_wide' | 'rerank' | 'escalation'
   status: number
   ms: number
   model?: string
@@ -282,4 +285,35 @@ export const route = async (
     const reason = err instanceof JevError ? err.message : 'jev failure'
     return { outcome: 'error', selected: [], reason, calls, ...models }
   }
+}
+
+// What to do about trouble inside a turn: one Choice, over the options that exist
+// (no larger model, or no higher effort, leaves that option out).
+export const escalationBody = (request: string, facts: Record<string, unknown>, offered: readonly EscalationOption[], model: string) => ({
+  state: { request, escalation: facts },
+  model,
+  questions: {
+    change: {
+      type: 'choice',
+      instructions: ESCALATION_INSTRUCTIONS,
+      criteria: Object.fromEntries(offered.map(option => [option, ESCALATION_OPTIONS[option]])),
+    },
+  } as Questions,
+})
+
+// Jev's pick among the options offered, with the probabilities it gave.
+export const askEscalation = async (
+  send: Send,
+  now: () => Promise<number>,
+  body: ReturnType<typeof escalationBody>,
+): Promise<{ choice: EscalationOption; probabilities: Record<string, number> }> => {
+  const reply = await ask(send, now, 'escalation', body, [])
+  const answer = choice(reply, 'change')
+  const offered = Object.keys(body.questions.change!.criteria ?? {}) as EscalationOption[]
+  const ranked = offered
+    .map(option => ({ option, p: typeof answer.probabilities[option] === 'number' ? answer.probabilities[option]! : 0 }))
+    .sort((a, b) => b.p - a.p)
+  const best = ranked[0]
+  if (!best || best.p <= 0) throw new JevError('parse')
+  return { choice: best.option, probabilities: Object.fromEntries(ranked.map(r => [r.option, round3(r.p)])) }
 }
