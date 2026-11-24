@@ -71,7 +71,7 @@ export const DEFAULT_MODEL_CRITERIA: Record<string, string> = {
 // how far it goes through a multi-step task before it checks in. The person can rewrite
 // them with /jev-model set.
 export const DEFAULT_EFFORT_LEVELS: Readonly<Record<Effort, string>> = {
-  low: 'Little deliberate reasoning and little checking: it does the task as stated. Enough when the path is clear.',
+  low: 'Little deliberate reasoning and little checking: it does the task as stated, and when context is missing it tends to ask rather than work it out alone. Enough when the path is clear and the task is well specified.',
   medium: 'Moderate thoroughness: it reads what it needs, weighs what it finds and checks the obvious risks before reporting. Often the default level.',
   high: 'Thorough: it reads more of the code around the task, runs tests or other checks and double-checks its work before it reports back.',
   xhigh: 'Deeper than high: it works hard problems through step by step, tests its own conclusions and goes back over them before it reports back.',
