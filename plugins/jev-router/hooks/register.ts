@@ -1680,27 +1680,6 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'jev-tool' }, async ($, e) => ({ text: await toolCommand($, e.args) }))
   on('command.run', { command: 'jev-skills' }, async ($, e) => ({ text: await skillsCommand($, e.args) }))
 
-  // Diagnostic: which prompt.* events the host raises for this plugin. Only the
-  // event name goes to the log (write_log on). Where an organization manages
-  // Claude Code, the host may pass these over a plugin a person installed; the
-  // lines never appearing is how that shows.
-  on('prompt.compose', async ($, e, next) => {
-    await log($, { type: 'event', event: 'prompt.compose' })
-    return next(e)
-  }).catch(($, e, next) => next(e))
-  on('prompt.attachment', async ($, e, next) => {
-    await log($, { type: 'event', event: 'prompt.attachment', attachment: String((e as { type?: unknown }).type) })
-    return next(e)
-  }).catch(($, e, next) => next(e))
-  on('prompt.section', async ($, e, next) => {
-    await log($, { type: 'event', event: 'prompt.section' })
-    return next(e)
-  }).catch(($, e, next) => next(e))
-  on('prompt.context', async ($, e, next) => {
-    await log($, { type: 'event', event: 'prompt.context' })
-    return next(e)
-  }).catch(($, e, next) => next(e))
-
   on('tool.call', { tool: 'mcp__jev-router__decide' }, async ($, e) => {
     const input = { decision_owner: e.decision_owner, authority: e.authority, state: e.state, questions: e.questions }
     const prepared = prepareDecision(input, [config.key])
